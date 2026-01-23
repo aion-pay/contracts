@@ -1,0 +1,26 @@
+# Build artifacts
+build/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local configuration
+.aptos/
+.movement/
+
+# Test artifacts
+*.log
+coverage/
+
+# Environment files
+.env
+.env.local
+.env.*.local

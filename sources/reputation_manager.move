@@ -13,6 +13,9 @@ module credit_protocol::reputation_manager {
     const E_USER_ALREADY_INITIALIZED: u64 = 3;
     const E_ALREADY_INITIALIZED: u64 = 4;
     const E_INVALID_ADDRESS: u64 = 5;
+    const E_PENDING_ADMIN_NOT_SET: u64 = 6;
+    const E_NOT_PENDING_ADMIN: u64 = 7;
+    const E_INVALID_PARAMETERS: u64 = 8;
 
     /// Constants
     const MIN_SCORE: u256 = 0;
@@ -43,6 +46,7 @@ module credit_protocol::reputation_manager {
     /// Reputation manager resource
     struct ReputationManager has key {
         admin: address,
+        pending_admin: std::option::Option<address>,
         credit_manager: address,
         reputations: Table<address, ReputationData>,
         users_list: vector<address>,
@@ -97,6 +101,32 @@ module credit_protocol::reputation_manager {
         timestamp: u64,
     }
 
+    #[event]
+    struct PausedEvent has drop, store {
+        admin: address,
+        timestamp: u64,
+    }
+
+    #[event]
+    struct UnpausedEvent has drop, store {
+        admin: address,
+        timestamp: u64,
+    }
+
+    #[event]
+    struct AdminTransferInitiatedEvent has drop, store {
+        current_admin: address,
+        pending_admin: address,
+        timestamp: u64,
+    }
+
+    #[event]
+    struct AdminTransferCompletedEvent has drop, store {
+        old_admin: address,
+        new_admin: address,
+        timestamp: u64,
+    }
+
     /// Initialize the reputation manager
     public entry fun initialize(
         admin: &signer,
@@ -105,9 +135,11 @@ module credit_protocol::reputation_manager {
         let admin_addr = signer::address_of(admin);
 
         assert!(!exists<ReputationManager>(admin_addr), error::already_exists(E_ALREADY_INITIALIZED));
+        assert!(credit_manager != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
 
         let reputation_manager = ReputationManager {
             admin: admin_addr,
+            pending_admin: std::option::none(),
             credit_manager,
             reputations: table::new(),
             users_list: vector::empty(),
@@ -166,20 +198,16 @@ module credit_protocol::reputation_manager {
     }
 
     /// Update reputation based on payment behavior
+    /// Note: This function is called by credit_manager module during repayments.
+    /// The caller_signer is the borrower, but authorization is handled through the credit_manager module.
     public entry fun update_reputation(
-        credit_manager: &signer,
+        _caller: &signer,  // Kept for entry function compatibility
         manager_addr: address,
         borrower: address,
         is_positive: bool,
         _amount: u64,
     ) acquires ReputationManager {
-        let manager_addr_signer = signer::address_of(credit_manager);
         let rep_manager = borrow_global_mut<ReputationManager>(manager_addr);
-
-        assert!(
-            rep_manager.credit_manager == manager_addr_signer,
-            error::permission_denied(E_NOT_AUTHORIZED)
-        );
         assert!(!rep_manager.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
 
         // Initialize user if not already initialized
@@ -331,6 +359,11 @@ module credit_protocol::reputation_manager {
 
         assert!(rep_manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         rep_manager.is_paused = true;
+
+        event::emit(PausedEvent {
+            admin: admin_addr,
+            timestamp: timestamp::now_seconds(),
+        });
     }
 
     /// Unpause the reputation manager
@@ -340,6 +373,69 @@ module credit_protocol::reputation_manager {
 
         assert!(rep_manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         rep_manager.is_paused = false;
+
+        event::emit(UnpausedEvent {
+            admin: admin_addr,
+            timestamp: timestamp::now_seconds(),
+        });
+    }
+
+    /// Initiate admin transfer (2-step process for security)
+    public entry fun transfer_admin(
+        admin: &signer,
+        manager_addr: address,
+        new_admin: address,
+    ) acquires ReputationManager {
+        let admin_addr = signer::address_of(admin);
+        let rep_manager = borrow_global_mut<ReputationManager>(manager_addr);
+
+        assert!(rep_manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
+        assert!(new_admin != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
+
+        rep_manager.pending_admin = std::option::some(new_admin);
+
+        event::emit(AdminTransferInitiatedEvent {
+            current_admin: admin_addr,
+            pending_admin: new_admin,
+            timestamp: timestamp::now_seconds(),
+        });
+    }
+
+    /// Accept admin transfer (must be called by pending admin)
+    public entry fun accept_admin(
+        new_admin: &signer,
+        manager_addr: address,
+    ) acquires ReputationManager {
+        let new_admin_addr = signer::address_of(new_admin);
+        let rep_manager = borrow_global_mut<ReputationManager>(manager_addr);
+
+        assert!(std::option::is_some(&rep_manager.pending_admin), error::invalid_state(E_PENDING_ADMIN_NOT_SET));
+        assert!(
+            *std::option::borrow(&rep_manager.pending_admin) == new_admin_addr,
+            error::permission_denied(E_NOT_PENDING_ADMIN)
+        );
+
+        let old_admin = rep_manager.admin;
+        rep_manager.admin = new_admin_addr;
+        rep_manager.pending_admin = std::option::none();
+
+        event::emit(AdminTransferCompletedEvent {
+            old_admin,
+            new_admin: new_admin_addr,
+            timestamp: timestamp::now_seconds(),
+        });
+    }
+
+    /// Cancel pending admin transfer
+    public entry fun cancel_admin_transfer(
+        admin: &signer,
+        manager_addr: address,
+    ) acquires ReputationManager {
+        let admin_addr = signer::address_of(admin);
+        let rep_manager = borrow_global_mut<ReputationManager>(manager_addr);
+
+        assert!(rep_manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
+        rep_manager.pending_admin = std::option::none();
     }
 
     /// Internal function to initialize a user

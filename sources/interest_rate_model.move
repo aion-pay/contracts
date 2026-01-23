@@ -4,8 +4,6 @@ module credit_protocol::interest_rate_model {
     use std::option::{Self, Option};
     use aptos_framework::timestamp;
     use aptos_framework::event;
-    use aptos_framework::object::{Self, Object};
-    use aptos_framework::account;
 
     /// Error codes
     const E_NOT_AUTHORIZED: u64 = 1;
@@ -15,6 +13,9 @@ module credit_protocol::interest_rate_model {
     const E_ALREADY_INITIALIZED: u64 = 5;
     const E_NOT_INITIALIZED: u64 = 6;
     const E_INVALID_PARAMETERS: u64 = 7;
+    const E_PENDING_ADMIN_NOT_SET: u64 = 8;
+    const E_NOT_PENDING_ADMIN: u64 = 9;
+    const E_INVALID_ADDRESS: u64 = 10;
 
     /// Constants
     const BASIS_POINTS: u256 = 10000;
@@ -42,6 +43,7 @@ module credit_protocol::interest_rate_model {
     /// Interest rate model resource
     struct InterestRateModel has key {
         admin: address,
+        pending_admin: Option<address>,
         credit_manager: address,
         lending_pool: Option<address>,
         rate_params: RateParameters,
@@ -83,6 +85,32 @@ module credit_protocol::interest_rate_model {
         timestamp: u64,
     }
 
+    #[event]
+    struct PausedEvent has drop, store {
+        admin: address,
+        timestamp: u64,
+    }
+
+    #[event]
+    struct UnpausedEvent has drop, store {
+        admin: address,
+        timestamp: u64,
+    }
+
+    #[event]
+    struct AdminTransferInitiatedEvent has drop, store {
+        current_admin: address,
+        pending_admin: address,
+        timestamp: u64,
+    }
+
+    #[event]
+    struct AdminTransferCompletedEvent has drop, store {
+        old_admin: address,
+        new_admin: address,
+        timestamp: u64,
+    }
+
     /// Initialize the interest rate model
     public entry fun initialize(
         admin: &signer,
@@ -92,6 +120,7 @@ module credit_protocol::interest_rate_model {
         let admin_addr = signer::address_of(admin);
 
         assert!(!exists<InterestRateModel>(admin_addr), error::already_exists(E_ALREADY_INITIALIZED));
+        assert!(credit_manager != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
 
         let rate_params = RateParameters {
             base_rate: 1500,  // 15%
@@ -105,6 +134,7 @@ module credit_protocol::interest_rate_model {
 
         let interest_rate_model = InterestRateModel {
             admin: admin_addr,
+            pending_admin: option::none(),
             credit_manager,
             lending_pool,
             rate_params,
@@ -339,6 +369,11 @@ module credit_protocol::interest_rate_model {
 
         assert!(model.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         model.is_paused = true;
+
+        event::emit(PausedEvent {
+            admin: admin_addr,
+            timestamp: timestamp::now_seconds(),
+        });
     }
 
     /// Unpause the interest rate model
@@ -348,6 +383,69 @@ module credit_protocol::interest_rate_model {
 
         assert!(model.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         model.is_paused = false;
+
+        event::emit(UnpausedEvent {
+            admin: admin_addr,
+            timestamp: timestamp::now_seconds(),
+        });
+    }
+
+    /// Initiate admin transfer (2-step process for security)
+    public entry fun transfer_admin(
+        admin: &signer,
+        model_addr: address,
+        new_admin: address,
+    ) acquires InterestRateModel {
+        let admin_addr = signer::address_of(admin);
+        let model = borrow_global_mut<InterestRateModel>(model_addr);
+
+        assert!(model.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
+        assert!(new_admin != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
+
+        model.pending_admin = option::some(new_admin);
+
+        event::emit(AdminTransferInitiatedEvent {
+            current_admin: admin_addr,
+            pending_admin: new_admin,
+            timestamp: timestamp::now_seconds(),
+        });
+    }
+
+    /// Accept admin transfer (must be called by pending admin)
+    public entry fun accept_admin(
+        new_admin: &signer,
+        model_addr: address,
+    ) acquires InterestRateModel {
+        let new_admin_addr = signer::address_of(new_admin);
+        let model = borrow_global_mut<InterestRateModel>(model_addr);
+
+        assert!(option::is_some(&model.pending_admin), error::invalid_state(E_PENDING_ADMIN_NOT_SET));
+        assert!(
+            *option::borrow(&model.pending_admin) == new_admin_addr,
+            error::permission_denied(E_NOT_PENDING_ADMIN)
+        );
+
+        let old_admin = model.admin;
+        model.admin = new_admin_addr;
+        model.pending_admin = option::none();
+
+        event::emit(AdminTransferCompletedEvent {
+            old_admin,
+            new_admin: new_admin_addr,
+            timestamp: timestamp::now_seconds(),
+        });
+    }
+
+    /// Cancel pending admin transfer
+    public entry fun cancel_admin_transfer(
+        admin: &signer,
+        model_addr: address,
+    ) acquires InterestRateModel {
+        let admin_addr = signer::address_of(admin);
+        let model = borrow_global_mut<InterestRateModel>(model_addr);
+
+        assert!(model.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
+        model.pending_admin = option::none();
     }
 
     /// Calculate dynamic rate based on utilization (internal function)

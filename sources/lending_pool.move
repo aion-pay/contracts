@@ -5,7 +5,10 @@ module credit_protocol::lending_pool {
     use std::option::{Self, Option};
     use aptos_framework::timestamp;
     use aptos_framework::event;
-    use aptos_framework::coin::{Self, Coin};
+    use aptos_framework::object::{Self, Object, ExtendRef};
+    use aptos_framework::fungible_asset::{Self, FungibleStore, Metadata};
+    use aptos_framework::primary_fungible_store;
+    use aptos_framework::dispatchable_fungible_asset;
     use aptos_framework::table::{Self, Table};
 
     /// Error codes
@@ -32,8 +35,8 @@ module credit_protocol::lending_pool {
         deposit_timestamp: u64,
     }
 
-    /// Lending pool resource - generic over CoinType (e.g., USDC)
-    struct LendingPool<phantom CoinType> has key {
+    /// Lending pool resource - uses Fungible Asset standard
+    struct LendingPool has key {
         admin: address,
         pending_admin: Option<address>,
         credit_manager: address,
@@ -43,11 +46,12 @@ module credit_protocol::lending_pool {
         protocol_fees_collected: u64,
         lenders: Table<address, LenderInfo>,
         lenders_list: vector<address>,
-        coin_reserve: Coin<CoinType>,
+        token_metadata: Object<Metadata>,
+        token_store: Object<FungibleStore>,
+        extend_ref: ExtendRef,  // For withdrawing from the store
         is_paused: bool,
     }
 
-    /// Events
     #[event]
     struct DepositEvent has drop, store {
         lender: address,
@@ -111,17 +115,25 @@ module credit_protocol::lending_pool {
         timestamp: u64,
     }
 
-    /// Initialize the lending pool
-    public entry fun initialize<CoinType>(
+    /// Initialize the lending pool with a specific fungible asset
+    public entry fun initialize(
         admin: &signer,
         credit_manager: address,
+        token_metadata_addr: address,
     ) {
         let admin_addr = signer::address_of(admin);
 
-        assert!(!exists<LendingPool<CoinType>>(admin_addr), error::already_exists(E_ALREADY_INITIALIZED));
+        assert!(!exists<LendingPool>(admin_addr), error::already_exists(E_ALREADY_INITIALIZED));
         assert!(credit_manager != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
 
-        let lending_pool = LendingPool<CoinType> {
+        let token_metadata = object::address_to_object<Metadata>(token_metadata_addr);
+
+        // Create a fungible store for the pool to hold tokens
+        let constructor_ref = object::create_object(admin_addr);
+        let extend_ref = object::generate_extend_ref(&constructor_ref);
+        let token_store = fungible_asset::create_store(&constructor_ref, token_metadata);
+
+        let lending_pool = LendingPool {
             admin: admin_addr,
             pending_admin: option::none(),
             credit_manager,
@@ -131,7 +143,9 @@ module credit_protocol::lending_pool {
             protocol_fees_collected: 0,
             lenders: table::new(),
             lenders_list: vector::empty(),
-            coin_reserve: coin::zero<CoinType>(),
+            token_metadata,
+            token_store,
+            extend_ref,
             is_paused: false,
         };
 
@@ -139,21 +153,21 @@ module credit_protocol::lending_pool {
     }
 
     /// Deposit funds into the lending pool
-    public entry fun deposit<CoinType>(
+    public entry fun deposit(
         lender: &signer,
         pool_addr: address,
         amount: u64,
     ) acquires LendingPool {
         let lender_addr = signer::address_of(lender);
-        let pool = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
 
         assert!(!pool.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
         assert!(amount > 0, error::invalid_argument(E_INVALID_AMOUNT));
         assert!(amount >= MIN_DEPOSIT_AMOUNT, error::invalid_argument(E_BELOW_MINIMUM_AMOUNT));
 
-        // Transfer coins from lender to pool
-        let deposit_coins = coin::withdraw<CoinType>(lender, amount);
-        coin::merge(&mut pool.coin_reserve, deposit_coins);
+        // Transfer tokens from lender to pool using dispatchable fungible asset
+        let fa = dispatchable_fungible_asset::withdraw(lender, primary_fungible_store::primary_store(signer::address_of(lender), pool.token_metadata), amount);
+        dispatchable_fungible_asset::deposit(pool.token_store, fa);
 
         // Update or create lender info
         if (table::contains(&pool.lenders, lender_addr)) {
@@ -180,19 +194,20 @@ module credit_protocol::lending_pool {
     }
 
     /// Withdraw funds from the lending pool
-    public entry fun withdraw<CoinType>(
+    public entry fun withdraw(
         lender: &signer,
         pool_addr: address,
         amount: u64,
     ) acquires LendingPool {
         let lender_addr = signer::address_of(lender);
-        let pool = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
 
         assert!(!pool.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
         assert!(table::contains(&pool.lenders, lender_addr), error::not_found(E_NOT_INITIALIZED));
 
         // Check available liquidity first
-        let available_liquidity = coin::value(&pool.coin_reserve) - pool.protocol_fees_collected;
+        let pool_balance = fungible_asset::balance(pool.token_store);
+        let available_liquidity = pool_balance - pool.protocol_fees_collected;
         assert!(available_liquidity >= amount, error::invalid_state(E_INSUFFICIENT_LIQUIDITY));
 
         let lender_info = table::borrow_mut(&mut pool.lenders, lender_addr);
@@ -208,65 +223,69 @@ module credit_protocol::lending_pool {
             table::remove(&mut pool.lenders, lender_addr);
         };
 
-        // Transfer coins to lender
-        let withdraw_coins = coin::extract(&mut pool.coin_reserve, amount);
-        coin::deposit(lender_addr, withdraw_coins);
+        // Transfer tokens to lender using extend_ref for signer capability
+        let pool_signer = object::generate_signer_for_extending(&pool.extend_ref);
+        let fa = dispatchable_fungible_asset::withdraw(&pool_signer, pool.token_store, amount);
+        dispatchable_fungible_asset::deposit(primary_fungible_store::ensure_primary_store_exists(lender_addr, pool.token_metadata), fa);
 
         event::emit(WithdrawEvent {
             lender: lender_addr,
             amount,
-            interest: 0, // Interest handling would be more complex in practice
+            interest: 0,
             timestamp: timestamp::now_seconds(),
         });
     }
 
     /// Borrow funds from the lending pool (only by credit manager)
-    public entry fun borrow<CoinType>(
+    public entry fun borrow(
         credit_manager: &signer,
         pool_addr: address,
         borrower: address,
         amount: u64,
     ) acquires LendingPool {
         let manager_addr = signer::address_of(credit_manager);
-        let pool = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
 
         assert!(pool.credit_manager == manager_addr, error::permission_denied(E_NOT_AUTHORIZED));
-
-        // Check available liquidity inline
-        let available_liquidity = coin::value(&pool.coin_reserve) - pool.protocol_fees_collected;
-        assert!(available_liquidity >= amount, error::invalid_state(E_INSUFFICIENT_LIQUIDITY));
-
-        pool.total_borrowed = pool.total_borrowed + amount;
-
-        // Transfer coins to borrower
-        let borrow_coins = coin::extract(&mut pool.coin_reserve, amount);
-        coin::deposit(borrower, borrow_coins);
-
-        event::emit(BorrowEvent {
-            borrower,
-            amount,
-            timestamp: timestamp::now_seconds(),
-        });
-    }
-
-    /// Borrow funds for direct payment to recipient (returns coins instead of depositing)
-    /// Note: This function is called by credit_manager module. Authorization is implicit through
-    /// module import controls - only credit_manager should call this function.
-    public fun borrow_for_payment<CoinType>(
-        pool_addr: address,
-        borrower: address,
-        amount: u64,
-    ): Coin<CoinType> acquires LendingPool {
-        let pool = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
 
         // Check available liquidity
-        let available_liquidity = coin::value(&pool.coin_reserve) - pool.protocol_fees_collected;
+        let pool_balance = fungible_asset::balance(pool.token_store);
+        let available_liquidity = pool_balance - pool.protocol_fees_collected;
         assert!(available_liquidity >= amount, error::invalid_state(E_INSUFFICIENT_LIQUIDITY));
 
         pool.total_borrowed = pool.total_borrowed + amount;
 
-        // Extract and return coins (caller will handle the transfer)
-        let borrow_coins = coin::extract(&mut pool.coin_reserve, amount);
+        // Transfer tokens to borrower using dispatchable fungible asset
+        let pool_signer = object::generate_signer_for_extending(&pool.extend_ref);
+        let fa = dispatchable_fungible_asset::withdraw(&pool_signer, pool.token_store, amount);
+        dispatchable_fungible_asset::deposit(primary_fungible_store::ensure_primary_store_exists(borrower, pool.token_metadata), fa);
+
+        event::emit(BorrowEvent {
+            borrower,
+            amount,
+            timestamp: timestamp::now_seconds(),
+        });
+    }
+
+    /// Borrow funds for direct payment to recipient (called internally by credit_manager)
+    public fun borrow_for_payment(
+        pool_addr: address,
+        borrower: address,
+        amount: u64,
+    ): u64 acquires LendingPool {
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
+
+        // Check available liquidity
+        let pool_balance = fungible_asset::balance(pool.token_store);
+        let available_liquidity = pool_balance - pool.protocol_fees_collected;
+        assert!(available_liquidity >= amount, error::invalid_state(E_INSUFFICIENT_LIQUIDITY));
+
+        pool.total_borrowed = pool.total_borrowed + amount;
+
+        // Transfer tokens to borrower using dispatchable fungible asset
+        let pool_signer = object::generate_signer_for_extending(&pool.extend_ref);
+        let fa = dispatchable_fungible_asset::withdraw(&pool_signer, pool.token_store, amount);
+        dispatchable_fungible_asset::deposit(primary_fungible_store::ensure_primary_store_exists(borrower, pool.token_metadata), fa);
 
         event::emit(BorrowEvent {
             borrower,
@@ -274,23 +293,20 @@ module credit_protocol::lending_pool {
             timestamp: timestamp::now_seconds(),
         });
 
-        borrow_coins
+        amount
     }
 
-    /// Repay borrowed funds (only by credit manager)
-    /// This function accepts coins and handles repayment accounting
-    public fun receive_repayment<CoinType>(
+    /// Receive repayment - called by credit_manager after withdrawing from borrower
+    public fun receive_repayment(
         pool_addr: address,
         borrower: address,
         principal: u64,
         interest: u64,
-        repay_coins: Coin<CoinType>,
+        from: &signer,
     ) acquires LendingPool {
-        let pool = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
 
-        // Verify the coin amount matches
-        let coin_value = coin::value(&repay_coins);
-        assert!(coin_value == principal + interest, error::invalid_argument(E_INVALID_AMOUNT));
+        let total_amount = principal + interest;
 
         // Calculate protocol fee
         let protocol_fee = ((interest as u256) * PROTOCOL_FEE_RATE / BASIS_POINTS as u64);
@@ -304,45 +320,9 @@ module credit_protocol::lending_pool {
             distribute_interest(pool, lender_interest);
         };
 
-        // Receive repayment coins
-        coin::merge(&mut pool.coin_reserve, repay_coins);
-
-        event::emit(RepayEvent {
-            borrower,
-            principal,
-            interest,
-            timestamp: timestamp::now_seconds(),
-        });
-    }
-
-    /// Legacy repay function for backwards compatibility (only by credit manager)
-    public entry fun repay<CoinType>(
-        credit_manager: &signer,
-        pool_addr: address,
-        borrower: address,
-        principal: u64,
-        interest: u64,
-    ) acquires LendingPool {
-        let manager_addr = signer::address_of(credit_manager);
-        let pool = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
-
-        assert!(pool.credit_manager == manager_addr, error::permission_denied(E_NOT_AUTHORIZED));
-
-        // Calculate protocol fee
-        let protocol_fee = ((interest as u256) * PROTOCOL_FEE_RATE / BASIS_POINTS as u64);
-        let lender_interest = interest - protocol_fee;
-
-        pool.total_repaid = pool.total_repaid + principal;
-        pool.protocol_fees_collected = pool.protocol_fees_collected + protocol_fee;
-
-        // Distribute interest to lenders
-        if (lender_interest > 0 && pool.total_deposited > 0) {
-            distribute_interest(pool, lender_interest);
-        };
-
-        // Receive repayment coins
-        let repay_coins = coin::withdraw<CoinType>(credit_manager, principal + interest);
-        coin::merge(&mut pool.coin_reserve, repay_coins);
+        // Receive repayment tokens from caller using dispatchable fungible asset
+        let fa = dispatchable_fungible_asset::withdraw(from, primary_fungible_store::primary_store(signer::address_of(from), pool.token_metadata), total_amount);
+        dispatchable_fungible_asset::deposit(pool.token_store, fa);
 
         event::emit(RepayEvent {
             borrower,
@@ -353,19 +333,19 @@ module credit_protocol::lending_pool {
     }
 
     /// Get available liquidity in the pool
-    public fun get_available_liquidity<CoinType>(pool_addr: address): u64 acquires LendingPool {
-        let pool = borrow_global<LendingPool<CoinType>>(pool_addr);
-        let total_balance = coin::value(&pool.coin_reserve);
-        if (total_balance > pool.protocol_fees_collected) {
-            total_balance - pool.protocol_fees_collected
+    public fun get_available_liquidity(pool_addr: address): u64 acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
+        let pool_balance = fungible_asset::balance(pool.token_store);
+        if (pool_balance > pool.protocol_fees_collected) {
+            pool_balance - pool.protocol_fees_collected
         } else {
             0
         }
     }
 
     /// Get utilization rate of the pool
-    public fun get_utilization_rate<CoinType>(pool_addr: address): u256 acquires LendingPool {
-        let pool = borrow_global<LendingPool<CoinType>>(pool_addr);
+    public fun get_utilization_rate(pool_addr: address): u256 acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
         if (pool.total_deposited == 0) return 0;
 
         let current_borrowed = if (pool.total_borrowed > pool.total_repaid) {
@@ -378,11 +358,11 @@ module credit_protocol::lending_pool {
     }
 
     /// Get lender information
-    public fun get_lender_info<CoinType>(
+    public fun get_lender_info(
         pool_addr: address,
         lender: address,
     ): (u64, u64, u64) acquires LendingPool {
-        let pool = borrow_global<LendingPool<CoinType>>(pool_addr);
+        let pool = borrow_global<LendingPool>(pool_addr);
 
         if (table::contains(&pool.lenders, lender)) {
             let lender_info = table::borrow(&pool.lenders, lender);
@@ -393,13 +373,13 @@ module credit_protocol::lending_pool {
     }
 
     /// Update credit manager (only by admin)
-    public entry fun update_credit_manager<CoinType>(
+    public entry fun update_credit_manager(
         admin: &signer,
         pool_addr: address,
         new_credit_manager: address,
     ) acquires LendingPool {
         let admin_addr = signer::address_of(admin);
-        let pool = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
 
         assert!(pool.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         assert!(new_credit_manager != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
@@ -415,14 +395,14 @@ module credit_protocol::lending_pool {
     }
 
     /// Withdraw protocol fees (only by admin)
-    public entry fun withdraw_protocol_fees<CoinType>(
+    public entry fun withdraw_protocol_fees(
         admin: &signer,
         pool_addr: address,
         to: address,
         amount: u64,
     ) acquires LendingPool {
         let admin_addr = signer::address_of(admin);
-        let pool = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
 
         assert!(pool.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         assert!(to != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
@@ -440,21 +420,22 @@ module credit_protocol::lending_pool {
 
         pool.protocol_fees_collected = pool.protocol_fees_collected - withdraw_amount;
 
-        // Transfer fees to specified address
-        let fee_coins = coin::extract(&mut pool.coin_reserve, withdraw_amount);
-        coin::deposit(to, fee_coins);
+        // Transfer fees using dispatchable fungible asset
+        let pool_signer = object::generate_signer_for_extending(&pool.extend_ref);
+        let fa = dispatchable_fungible_asset::withdraw(&pool_signer, pool.token_store, withdraw_amount);
+        dispatchable_fungible_asset::deposit(primary_fungible_store::ensure_primary_store_exists(to, pool.token_metadata), fa);
     }
 
     /// Get all lenders
-    public fun get_all_lenders<CoinType>(pool_addr: address): vector<address> acquires LendingPool {
-        let pool = borrow_global<LendingPool<CoinType>>(pool_addr);
+    public fun get_all_lenders(pool_addr: address): vector<address> acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
         pool.lenders_list
     }
 
     /// Pause the lending pool
-    public entry fun pause<CoinType>(admin: &signer, pool_addr: address) acquires LendingPool {
+    public entry fun pause(admin: &signer, pool_addr: address) acquires LendingPool {
         let admin_addr = signer::address_of(admin);
-        let pool = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
 
         assert!(pool.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         pool.is_paused = true;
@@ -466,9 +447,9 @@ module credit_protocol::lending_pool {
     }
 
     /// Unpause the lending pool
-    public entry fun unpause<CoinType>(admin: &signer, pool_addr: address) acquires LendingPool {
+    public entry fun unpause(admin: &signer, pool_addr: address) acquires LendingPool {
         let admin_addr = signer::address_of(admin);
-        let pool = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
 
         assert!(pool.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         pool.is_paused = false;
@@ -480,13 +461,13 @@ module credit_protocol::lending_pool {
     }
 
     /// Initiate admin transfer (2-step process for security)
-    public entry fun transfer_admin<CoinType>(
+    public entry fun transfer_admin(
         admin: &signer,
         pool_addr: address,
         new_admin: address,
     ) acquires LendingPool {
         let admin_addr = signer::address_of(admin);
-        let pool = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
 
         assert!(pool.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         assert!(new_admin != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
@@ -501,12 +482,12 @@ module credit_protocol::lending_pool {
     }
 
     /// Accept admin transfer (must be called by pending admin)
-    public entry fun accept_admin<CoinType>(
+    public entry fun accept_admin(
         new_admin: &signer,
         pool_addr: address,
     ) acquires LendingPool {
         let new_admin_addr = signer::address_of(new_admin);
-        let pool = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
 
         assert!(option::is_some(&pool.pending_admin), error::invalid_state(E_PENDING_ADMIN_NOT_SET));
         assert!(
@@ -526,19 +507,19 @@ module credit_protocol::lending_pool {
     }
 
     /// Cancel pending admin transfer
-    public entry fun cancel_admin_transfer<CoinType>(
+    public entry fun cancel_admin_transfer(
         admin: &signer,
         pool_addr: address,
     ) acquires LendingPool {
         let admin_addr = signer::address_of(admin);
-        let pool = borrow_global_mut<LendingPool<CoinType>>(pool_addr);
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
 
         assert!(pool.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         pool.pending_admin = option::none();
     }
 
     /// Internal function to distribute interest to lenders
-    fun distribute_interest<CoinType>(pool: &mut LendingPool<CoinType>, interest_amount: u64) {
+    fun distribute_interest(pool: &mut LendingPool, interest_amount: u64) {
         let i = 0;
         let len = vector::length(&pool.lenders_list);
 
@@ -557,7 +538,7 @@ module credit_protocol::lending_pool {
     }
 
     /// Internal function to remove lender from list
-    fun remove_lender_from_list<CoinType>(pool: &mut LendingPool<CoinType>, lender: address) {
+    fun remove_lender_from_list(pool: &mut LendingPool, lender: address) {
         let i = 0;
         let len = vector::length(&pool.lenders_list);
         let found = false;
@@ -572,39 +553,45 @@ module credit_protocol::lending_pool {
         };
     }
 
+    /// Get token metadata address
+    public fun get_token_metadata(pool_addr: address): Object<Metadata> acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
+        pool.token_metadata
+    }
+
     /// View functions
-    public fun get_total_deposited<CoinType>(pool_addr: address): u64 acquires LendingPool {
-        let pool = borrow_global<LendingPool<CoinType>>(pool_addr);
+    public fun get_total_deposited(pool_addr: address): u64 acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
         pool.total_deposited
     }
 
-    public fun get_total_borrowed<CoinType>(pool_addr: address): u64 acquires LendingPool {
-        let pool = borrow_global<LendingPool<CoinType>>(pool_addr);
+    public fun get_total_borrowed(pool_addr: address): u64 acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
         pool.total_borrowed
     }
 
-    public fun get_total_repaid<CoinType>(pool_addr: address): u64 acquires LendingPool {
-        let pool = borrow_global<LendingPool<CoinType>>(pool_addr);
+    public fun get_total_repaid(pool_addr: address): u64 acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
         pool.total_repaid
     }
 
-    public fun get_protocol_fees_collected<CoinType>(pool_addr: address): u64 acquires LendingPool {
-        let pool = borrow_global<LendingPool<CoinType>>(pool_addr);
+    public fun get_protocol_fees_collected(pool_addr: address): u64 acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
         pool.protocol_fees_collected
     }
 
-    public fun is_paused<CoinType>(pool_addr: address): bool acquires LendingPool {
-        let pool = borrow_global<LendingPool<CoinType>>(pool_addr);
+    public fun is_paused(pool_addr: address): bool acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
         pool.is_paused
     }
 
-    public fun get_admin<CoinType>(pool_addr: address): address acquires LendingPool {
-        let pool = borrow_global<LendingPool<CoinType>>(pool_addr);
+    public fun get_admin(pool_addr: address): address acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
         pool.admin
     }
 
-    public fun get_credit_manager<CoinType>(pool_addr: address): address acquires LendingPool {
-        let pool = borrow_global<LendingPool<CoinType>>(pool_addr);
+    public fun get_credit_manager(pool_addr: address): address acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
         pool.credit_manager
     }
 }

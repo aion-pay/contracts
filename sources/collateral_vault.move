@@ -6,7 +6,10 @@ module credit_protocol::collateral_vault {
     use std::option::{Self, Option};
     use aptos_framework::timestamp;
     use aptos_framework::event;
-    use aptos_framework::coin::{Self, Coin};
+    use aptos_framework::object::{Self, Object, ExtendRef};
+    use aptos_framework::fungible_asset::{Self, FungibleStore, Metadata};
+    use aptos_framework::primary_fungible_store;
+    use aptos_framework::dispatchable_fungible_asset;
     use aptos_framework::table::{Self, Table};
 
     /// Error codes
@@ -44,8 +47,8 @@ module credit_protocol::collateral_vault {
         last_update_timestamp: u64,
     }
 
-    /// Collateral vault resource - generic over CoinType (use with USDC)
-    struct CollateralVault<phantom CoinType> has key {
+    /// Collateral vault resource - uses Fungible Asset standard
+    struct CollateralVault has key {
         admin: address,
         pending_admin: Option<address>,
         credit_manager: address,
@@ -53,7 +56,9 @@ module credit_protocol::collateral_vault {
         user_collateral: Table<address, UserCollateral>,
         users_list: vector<address>,
         total_collateral: u64,
-        coin_reserve: Coin<CoinType>,
+        token_metadata: Object<Metadata>,
+        token_store: Object<FungibleStore>,
+        extend_ref: ExtendRef,  // For withdrawing from the store
         collateralization_ratio: u256,
         liquidation_threshold: u256,
         max_collateral_amount: u64,
@@ -141,17 +146,25 @@ module credit_protocol::collateral_vault {
         timestamp: u64,
     }
 
-    /// Initialize the collateral vault for a specific coin type (e.g., USDC)
-    public entry fun initialize<CoinType>(
+    /// Initialize the collateral vault with a specific fungible asset
+    public entry fun initialize(
         admin: &signer,
         credit_manager: address,
+        token_metadata_addr: address,
     ) {
         let admin_addr = signer::address_of(admin);
 
-        assert!(!exists<CollateralVault<CoinType>>(admin_addr), error::already_exists(E_ALREADY_INITIALIZED));
+        assert!(!exists<CollateralVault>(admin_addr), error::already_exists(E_ALREADY_INITIALIZED));
         assert!(credit_manager != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
 
-        let collateral_vault = CollateralVault<CoinType> {
+        let token_metadata = object::address_to_object<Metadata>(token_metadata_addr);
+
+        // Create a fungible store for the vault
+        let constructor_ref = object::create_object(admin_addr);
+        let extend_ref = object::generate_extend_ref(&constructor_ref);
+        let token_store = fungible_asset::create_store(&constructor_ref, token_metadata);
+
+        let collateral_vault = CollateralVault {
             admin: admin_addr,
             pending_admin: option::none(),
             credit_manager,
@@ -159,7 +172,9 @@ module credit_protocol::collateral_vault {
             user_collateral: table::new(),
             users_list: vector::empty(),
             total_collateral: 0,
-            coin_reserve: coin::zero<CoinType>(),
+            token_metadata,
+            token_store,
+            extend_ref,
             collateralization_ratio: 15000, // 150%
             liquidation_threshold: 12000,   // 120%
             max_collateral_amount: 1000000000000, // 1M USDC (with 6 decimals)
@@ -170,14 +185,14 @@ module credit_protocol::collateral_vault {
     }
 
     /// Deposit collateral (only by credit manager)
-    public entry fun deposit_collateral<CoinType>(
+    public entry fun deposit_collateral(
         credit_manager: &signer,
         vault_addr: address,
         borrower: address,
         amount: u64,
     ) acquires CollateralVault {
         let manager_addr = signer::address_of(credit_manager);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         assert!(vault.credit_manager == manager_addr, error::permission_denied(E_NOT_AUTHORIZED));
         assert!(!vault.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
@@ -189,9 +204,9 @@ module credit_protocol::collateral_vault {
             error::invalid_state(E_EXCEEDS_MAX_LIMIT)
         );
 
-        // Transfer collateral from credit_manager to vault
-        let collateral_coins = coin::withdraw<CoinType>(credit_manager, amount);
-        coin::merge(&mut vault.coin_reserve, collateral_coins);
+        // Transfer collateral from credit_manager to vault using dispatchable fungible asset
+        let fa = dispatchable_fungible_asset::withdraw(credit_manager, primary_fungible_store::primary_store(signer::address_of(credit_manager), vault.token_metadata), amount);
+        dispatchable_fungible_asset::deposit(vault.token_store, fa);
 
         // Update or create user collateral
         if (table::contains(&vault.user_collateral, borrower)) {
@@ -231,14 +246,14 @@ module credit_protocol::collateral_vault {
     }
 
     /// Withdraw collateral (only by credit manager)
-    public entry fun withdraw_collateral<CoinType>(
+    public entry fun withdraw_collateral(
         credit_manager: &signer,
         vault_addr: address,
         borrower: address,
         amount: u64,
     ) acquires CollateralVault {
         let manager_addr = signer::address_of(credit_manager);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         assert!(vault.credit_manager == manager_addr, error::permission_denied(E_NOT_AUTHORIZED));
         assert!(!vault.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
@@ -260,8 +275,10 @@ module credit_protocol::collateral_vault {
             table::remove(&mut vault.user_collateral, borrower);
         };
 
-        let withdrawal_coins = coin::extract(&mut vault.coin_reserve, amount);
-        coin::deposit(borrower, withdrawal_coins);
+        // Transfer collateral to borrower using dispatchable fungible asset
+        let vault_signer = object::generate_signer_for_extending(&vault.extend_ref);
+        let fa = dispatchable_fungible_asset::withdraw(&vault_signer, vault.token_store, amount);
+        dispatchable_fungible_asset::deposit(primary_fungible_store::ensure_primary_store_exists(borrower, vault.token_metadata), fa);
 
         event::emit(CollateralWithdrawnEvent {
             user: borrower,
@@ -272,7 +289,7 @@ module credit_protocol::collateral_vault {
     }
 
     /// Lock collateral (only by credit manager)
-    public entry fun lock_collateral<CoinType>(
+    public entry fun lock_collateral(
         credit_manager: &signer,
         vault_addr: address,
         user: address,
@@ -280,7 +297,7 @@ module credit_protocol::collateral_vault {
         reason: String,
     ) acquires CollateralVault {
         let manager_addr = signer::address_of(credit_manager);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         assert!(vault.credit_manager == manager_addr, error::permission_denied(E_NOT_AUTHORIZED));
         assert!(amount > 0, error::invalid_argument(E_INVALID_AMOUNT));
@@ -306,14 +323,14 @@ module credit_protocol::collateral_vault {
     }
 
     /// Unlock collateral (only by credit manager)
-    public entry fun unlock_collateral<CoinType>(
+    public entry fun unlock_collateral(
         credit_manager: &signer,
         vault_addr: address,
         user: address,
         amount: u64,
     ) acquires CollateralVault {
         let manager_addr = signer::address_of(credit_manager);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         assert!(vault.credit_manager == manager_addr, error::permission_denied(E_NOT_AUTHORIZED));
         assert!(amount > 0, error::invalid_argument(E_INVALID_AMOUNT));
@@ -339,14 +356,14 @@ module credit_protocol::collateral_vault {
     }
 
     /// Liquidate collateral (only by authorized liquidator)
-    public entry fun liquidate_collateral<CoinType>(
+    public entry fun liquidate_collateral(
         liquidator: &signer,
         vault_addr: address,
         user: address,
         amount: u64,
     ) acquires CollateralVault {
         let liquidator_addr = signer::address_of(liquidator);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         let is_authorized = vault.credit_manager == liquidator_addr ||
             (option::is_some(&vault.liquidator) && *option::borrow(&vault.liquidator) == liquidator_addr);
@@ -368,8 +385,10 @@ module credit_protocol::collateral_vault {
             table::remove(&mut vault.user_collateral, user);
         };
 
-        let liquidation_coins = coin::extract(&mut vault.coin_reserve, amount);
-        coin::deposit(liquidator_addr, liquidation_coins);
+        // Transfer liquidated collateral to liquidator using dispatchable fungible asset
+        let vault_signer = object::generate_signer_for_extending(&vault.extend_ref);
+        let fa = dispatchable_fungible_asset::withdraw(&vault_signer, vault.token_store, amount);
+        dispatchable_fungible_asset::deposit(primary_fungible_store::ensure_primary_store_exists(liquidator_addr, vault.token_metadata), fa);
 
         event::emit(CollateralLiquidatedEvent {
             user,
@@ -380,14 +399,14 @@ module credit_protocol::collateral_vault {
     }
 
     /// Emergency withdraw (only by admin when paused)
-    public entry fun emergency_withdraw<CoinType>(
+    public entry fun emergency_withdraw(
         admin: &signer,
         vault_addr: address,
         user: address,
         amount: u64,
     ) acquires CollateralVault {
         let admin_addr = signer::address_of(admin);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         assert!(vault.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         assert!(vault.is_paused, error::invalid_state(E_CONTRACT_NOT_PAUSED));
@@ -399,8 +418,10 @@ module credit_protocol::collateral_vault {
         user_collateral.amount = user_collateral.amount - amount;
         vault.total_collateral = vault.total_collateral - amount;
 
-        let emergency_coins = coin::extract(&mut vault.coin_reserve, amount);
-        coin::deposit(user, emergency_coins);
+        // Emergency withdraw using dispatchable fungible asset
+        let vault_signer = object::generate_signer_for_extending(&vault.extend_ref);
+        let fa = dispatchable_fungible_asset::withdraw(&vault_signer, vault.token_store, amount);
+        dispatchable_fungible_asset::deposit(primary_fungible_store::ensure_primary_store_exists(user, vault.token_metadata), fa);
 
         event::emit(EmergencyWithdrawalEvent {
             user,
@@ -411,7 +432,7 @@ module credit_protocol::collateral_vault {
     }
 
     /// Update parameters (only by admin)
-    public entry fun update_parameters<CoinType>(
+    public entry fun update_parameters(
         admin: &signer,
         vault_addr: address,
         collateralization_ratio: u256,
@@ -419,7 +440,7 @@ module credit_protocol::collateral_vault {
         max_collateral_amount: u64,
     ) acquires CollateralVault {
         let admin_addr = signer::address_of(admin);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         assert!(vault.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         assert!(
@@ -447,34 +468,34 @@ module credit_protocol::collateral_vault {
     }
 
     /// Set liquidator (only by admin)
-    public entry fun set_liquidator<CoinType>(
+    public entry fun set_liquidator(
         admin: &signer,
         vault_addr: address,
         liquidator: address,
     ) acquires CollateralVault {
         let admin_addr = signer::address_of(admin);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         assert!(vault.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         vault.liquidator = option::some(liquidator);
     }
 
     /// Remove liquidator (only by admin)
-    public entry fun remove_liquidator<CoinType>(
+    public entry fun remove_liquidator(
         admin: &signer,
         vault_addr: address,
     ) acquires CollateralVault {
         let admin_addr = signer::address_of(admin);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         assert!(vault.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         vault.liquidator = option::none();
     }
 
     /// Pause the vault
-    public entry fun pause<CoinType>(admin: &signer, vault_addr: address) acquires CollateralVault {
+    public entry fun pause(admin: &signer, vault_addr: address) acquires CollateralVault {
         let admin_addr = signer::address_of(admin);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         assert!(vault.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         vault.is_paused = true;
@@ -486,9 +507,9 @@ module credit_protocol::collateral_vault {
     }
 
     /// Unpause the vault
-    public entry fun unpause<CoinType>(admin: &signer, vault_addr: address) acquires CollateralVault {
+    public entry fun unpause(admin: &signer, vault_addr: address) acquires CollateralVault {
         let admin_addr = signer::address_of(admin);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         assert!(vault.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         vault.is_paused = false;
@@ -500,13 +521,13 @@ module credit_protocol::collateral_vault {
     }
 
     /// Initiate admin transfer (2-step process for security)
-    public entry fun transfer_admin<CoinType>(
+    public entry fun transfer_admin(
         admin: &signer,
         vault_addr: address,
         new_admin: address,
     ) acquires CollateralVault {
         let admin_addr = signer::address_of(admin);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         assert!(vault.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         assert!(new_admin != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
@@ -521,12 +542,12 @@ module credit_protocol::collateral_vault {
     }
 
     /// Accept admin transfer (must be called by pending admin)
-    public entry fun accept_admin<CoinType>(
+    public entry fun accept_admin(
         new_admin: &signer,
         vault_addr: address,
     ) acquires CollateralVault {
         let new_admin_addr = signer::address_of(new_admin);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         assert!(option::is_some(&vault.pending_admin), error::invalid_state(E_PENDING_ADMIN_NOT_SET));
         assert!(
@@ -546,20 +567,20 @@ module credit_protocol::collateral_vault {
     }
 
     /// Cancel pending admin transfer
-    public entry fun cancel_admin_transfer<CoinType>(
+    public entry fun cancel_admin_transfer(
         admin: &signer,
         vault_addr: address,
     ) acquires CollateralVault {
         let admin_addr = signer::address_of(admin);
-        let vault = borrow_global_mut<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global_mut<CollateralVault>(vault_addr);
 
         assert!(vault.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         vault.pending_admin = option::none();
     }
 
     /// Get collateral balance for a user
-    public fun get_collateral_balance<CoinType>(vault_addr: address, user: address): u64 acquires CollateralVault {
-        let vault = borrow_global<CollateralVault<CoinType>>(vault_addr);
+    public fun get_collateral_balance(vault_addr: address, user: address): u64 acquires CollateralVault {
+        let vault = borrow_global<CollateralVault>(vault_addr);
         if (table::contains(&vault.user_collateral, user)) {
             let user_collateral = table::borrow(&vault.user_collateral, user);
             user_collateral.amount
@@ -569,11 +590,11 @@ module credit_protocol::collateral_vault {
     }
 
     /// Get user collateral details
-    public fun get_user_collateral<CoinType>(
+    public fun get_user_collateral(
         vault_addr: address,
         user: address,
     ): (u64, u64, u64, u8) acquires CollateralVault {
-        let vault = borrow_global<CollateralVault<CoinType>>(vault_addr);
+        let vault = borrow_global<CollateralVault>(vault_addr);
         if (table::contains(&vault.user_collateral, user)) {
             let user_collateral = table::borrow(&vault.user_collateral, user);
             let available_amount = user_collateral.amount - user_collateral.locked_amount;
@@ -584,13 +605,13 @@ module credit_protocol::collateral_vault {
     }
 
     /// Get all users
-    public fun get_all_users<CoinType>(vault_addr: address): vector<address> acquires CollateralVault {
-        let vault = borrow_global<CollateralVault<CoinType>>(vault_addr);
+    public fun get_all_users(vault_addr: address): vector<address> acquires CollateralVault {
+        let vault = borrow_global<CollateralVault>(vault_addr);
         vault.users_list
     }
 
     /// Internal function to remove user from list
-    fun remove_user_from_list<CoinType>(vault: &mut CollateralVault<CoinType>, user: address) {
+    fun remove_user_from_list(vault: &mut CollateralVault, user: address) {
         let i = 0;
         let len = vector::length(&vault.users_list);
         let found = false;
@@ -606,38 +627,43 @@ module credit_protocol::collateral_vault {
     }
 
     /// View functions
-    public fun get_total_collateral<CoinType>(vault_addr: address): u64 acquires CollateralVault {
-        let vault = borrow_global<CollateralVault<CoinType>>(vault_addr);
+    public fun get_total_collateral(vault_addr: address): u64 acquires CollateralVault {
+        let vault = borrow_global<CollateralVault>(vault_addr);
         vault.total_collateral
     }
 
-    public fun get_collateralization_ratio<CoinType>(vault_addr: address): u256 acquires CollateralVault {
-        let vault = borrow_global<CollateralVault<CoinType>>(vault_addr);
+    public fun get_collateralization_ratio(vault_addr: address): u256 acquires CollateralVault {
+        let vault = borrow_global<CollateralVault>(vault_addr);
         vault.collateralization_ratio
     }
 
-    public fun get_liquidation_threshold<CoinType>(vault_addr: address): u256 acquires CollateralVault {
-        let vault = borrow_global<CollateralVault<CoinType>>(vault_addr);
+    public fun get_liquidation_threshold(vault_addr: address): u256 acquires CollateralVault {
+        let vault = borrow_global<CollateralVault>(vault_addr);
         vault.liquidation_threshold
     }
 
-    public fun get_max_collateral_amount<CoinType>(vault_addr: address): u64 acquires CollateralVault {
-        let vault = borrow_global<CollateralVault<CoinType>>(vault_addr);
+    public fun get_max_collateral_amount(vault_addr: address): u64 acquires CollateralVault {
+        let vault = borrow_global<CollateralVault>(vault_addr);
         vault.max_collateral_amount
     }
 
-    public fun is_paused<CoinType>(vault_addr: address): bool acquires CollateralVault {
-        let vault = borrow_global<CollateralVault<CoinType>>(vault_addr);
+    public fun is_paused(vault_addr: address): bool acquires CollateralVault {
+        let vault = borrow_global<CollateralVault>(vault_addr);
         vault.is_paused
     }
 
-    public fun get_admin<CoinType>(vault_addr: address): address acquires CollateralVault {
-        let vault = borrow_global<CollateralVault<CoinType>>(vault_addr);
+    public fun get_admin(vault_addr: address): address acquires CollateralVault {
+        let vault = borrow_global<CollateralVault>(vault_addr);
         vault.admin
     }
 
-    public fun get_credit_manager<CoinType>(vault_addr: address): address acquires CollateralVault {
-        let vault = borrow_global<CollateralVault<CoinType>>(vault_addr);
+    public fun get_credit_manager(vault_addr: address): address acquires CollateralVault {
+        let vault = borrow_global<CollateralVault>(vault_addr);
         vault.credit_manager
+    }
+
+    public fun get_token_metadata(vault_addr: address): Object<Metadata> acquires CollateralVault {
+        let vault = borrow_global<CollateralVault>(vault_addr);
+        vault.token_metadata
     }
 }

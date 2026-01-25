@@ -3,9 +3,13 @@ module credit_protocol::credit_manager {
     use std::error;
     use std::vector;
     use std::string::{Self, String};
+    use std::option::{Self, Option};
     use aptos_framework::timestamp;
     use aptos_framework::event;
-    use aptos_framework::coin::{Self, Coin};
+    use aptos_framework::object::{Self, Object, ExtendRef};
+    use aptos_framework::fungible_asset::{Self, FungibleStore, Metadata};
+    use aptos_framework::primary_fungible_store;
+    use aptos_framework::dispatchable_fungible_asset;
     use aptos_framework::table::{Self, Table};
 
     // Import other modules
@@ -57,24 +61,25 @@ module credit_protocol::credit_manager {
         late_repayments: u64,
     }
 
-    /// Credit manager resource - generic over CoinType (e.g., USDC)
-    struct CreditManager<phantom CoinType> has key {
+    /// Credit manager resource - uses Fungible Asset standard
+    struct CreditManager has key {
         admin: address,
-        pending_admin: std::option::Option<address>,
+        pending_admin: Option<address>,
         lending_pool_addr: address,
         collateral_vault_addr: address,
         reputation_manager_addr: address,
         interest_rate_model_addr: address,
-        fixed_interest_rate: u256,      // basis points
-        reputation_threshold: u256,      // reputation score threshold
-        credit_increase_multiplier: u256, // basis points
+        fixed_interest_rate: u256,
+        reputation_threshold: u256,
+        credit_increase_multiplier: u256,
         credit_lines: Table<address, CreditLine>,
         borrowers_list: vector<address>,
-        collateral_reserve: Coin<CoinType>, // For handling collateral transfers
+        token_metadata: Object<Metadata>,
+        token_store: Object<FungibleStore>,
+        extend_ref: ExtendRef,  // For withdrawing from the store
         is_paused: bool,
     }
 
-    /// Events
     #[event]
     struct CreditOpenedEvent has drop, store {
         borrower: address,
@@ -181,36 +186,45 @@ module credit_protocol::credit_manager {
         timestamp: u64,
     }
 
-    /// Initialize the credit manager
-    public entry fun initialize<CoinType>(
+    /// Initialize the credit manager with a specific fungible asset
+    public entry fun initialize(
         admin: &signer,
         lending_pool_addr: address,
         collateral_vault_addr: address,
         reputation_manager_addr: address,
         interest_rate_model_addr: address,
+        token_metadata_addr: address,
     ) {
         let admin_addr = signer::address_of(admin);
 
-        assert!(!exists<CreditManager<CoinType>>(admin_addr), error::already_exists(E_ALREADY_INITIALIZED));
-        // Validate all addresses are non-zero
+        assert!(!exists<CreditManager>(admin_addr), error::already_exists(E_ALREADY_INITIALIZED));
         assert!(lending_pool_addr != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
         assert!(collateral_vault_addr != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
         assert!(reputation_manager_addr != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
         assert!(interest_rate_model_addr != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
 
-        let credit_manager = CreditManager<CoinType> {
+        let token_metadata = object::address_to_object<Metadata>(token_metadata_addr);
+
+        // Create a fungible store for holding collateral
+        let constructor_ref = object::create_object(admin_addr);
+        let extend_ref = object::generate_extend_ref(&constructor_ref);
+        let token_store = fungible_asset::create_store(&constructor_ref, token_metadata);
+
+        let credit_manager = CreditManager {
             admin: admin_addr,
-            pending_admin: std::option::none(),
+            pending_admin: option::none(),
             lending_pool_addr,
             collateral_vault_addr,
             reputation_manager_addr,
             interest_rate_model_addr,
             fixed_interest_rate: 1500, // 15%
             reputation_threshold: 750,
-            credit_increase_multiplier: 12000, // 120% (20% increase from base)
+            credit_increase_multiplier: 12000, // 120%
             credit_lines: table::new(),
             borrowers_list: vector::empty(),
-            collateral_reserve: coin::zero<CoinType>(),
+            token_metadata,
+            token_store,
+            extend_ref,
             is_paused: false,
         };
 
@@ -218,13 +232,13 @@ module credit_protocol::credit_manager {
     }
 
     /// Open a credit line
-    public entry fun open_credit_line<CoinType>(
+    public entry fun open_credit_line(
         borrower: &signer,
         manager_addr: address,
         collateral_amount: u64,
     ) acquires CreditManager {
         let borrower_addr = signer::address_of(borrower);
-        let manager = borrow_global_mut<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global_mut<CreditManager>(manager_addr);
 
         assert!(!manager.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
         assert!(collateral_amount > 0, error::invalid_argument(E_INVALID_AMOUNT));
@@ -234,11 +248,11 @@ module credit_protocol::credit_manager {
             error::already_exists(E_CREDIT_LINE_EXISTS)
         );
 
-        // Transfer collateral from borrower to manager's collateral reserve
-        let collateral_coins = coin::withdraw<CoinType>(borrower, collateral_amount);
-        coin::merge(&mut manager.collateral_reserve, collateral_coins);
+        // Transfer collateral from borrower to manager's collateral reserve using dispatchable fungible asset
+        let collateral_fa = dispatchable_fungible_asset::withdraw(borrower, primary_fungible_store::primary_store(signer::address_of(borrower), manager.token_metadata), collateral_amount);
+        dispatchable_fungible_asset::deposit(manager.token_store, collateral_fa);
 
-        // Calculate credit limit (1:1 ratio - can be adjusted based on collateral type)
+        // Calculate credit limit (1:1 ratio)
         let credit_limit = collateral_amount;
 
         let credit_line = CreditLine {
@@ -267,13 +281,13 @@ module credit_protocol::credit_manager {
     }
 
     /// Add collateral to existing credit line
-    public entry fun add_collateral<CoinType>(
+    public entry fun add_collateral(
         borrower: &signer,
         manager_addr: address,
         collateral_amount: u64,
     ) acquires CreditManager {
         let borrower_addr = signer::address_of(borrower);
-        let manager = borrow_global_mut<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global_mut<CreditManager>(manager_addr);
 
         assert!(!manager.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
         assert!(collateral_amount > 0, error::invalid_argument(E_INVALID_AMOUNT));
@@ -285,9 +299,9 @@ module credit_protocol::credit_manager {
         let credit_line = table::borrow_mut(&mut manager.credit_lines, borrower_addr);
         assert!(credit_line.is_active, error::invalid_state(E_CREDIT_LINE_NOT_ACTIVE));
 
-        // Transfer additional collateral
-        let collateral_coins = coin::withdraw<CoinType>(borrower, collateral_amount);
-        coin::merge(&mut manager.collateral_reserve, collateral_coins);
+        // Transfer additional collateral using dispatchable fungible asset
+        let collateral_fa = dispatchable_fungible_asset::withdraw(borrower, primary_fungible_store::primary_store(signer::address_of(borrower), manager.token_metadata), collateral_amount);
+        dispatchable_fungible_asset::deposit(manager.token_store, collateral_fa);
 
         // Update credit line
         credit_line.collateral_deposited = credit_line.collateral_deposited + collateral_amount;
@@ -303,13 +317,13 @@ module credit_protocol::credit_manager {
     }
 
     /// Borrow funds
-    public entry fun borrow<CoinType>(
+    public entry fun borrow(
         borrower: &signer,
         manager_addr: address,
         amount: u64,
     ) acquires CreditManager {
         let borrower_addr = signer::address_of(borrower);
-        let manager = borrow_global_mut<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global_mut<CreditManager>(manager_addr);
 
         assert!(!manager.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
         assert!(amount > 0, error::invalid_argument(E_INVALID_AMOUNT));
@@ -332,22 +346,20 @@ module credit_protocol::credit_manager {
         );
 
         // Check available liquidity from lending pool
-        let available_liquidity = lending_pool::get_available_liquidity<CoinType>(manager.lending_pool_addr);
+        let available_liquidity = lending_pool::get_available_liquidity(manager.lending_pool_addr);
         assert!(available_liquidity >= amount, error::invalid_state(E_INSUFFICIENT_LIQUIDITY));
 
-        // Update credit line state first (checks-effects-interactions pattern)
+        // Update credit line state first
         credit_line.borrowed_amount = credit_line.borrowed_amount + amount;
         credit_line.last_borrowed_timestamp = timestamp::now_seconds();
-        // Set due date: grace period + 30 days for repayment
         credit_line.repayment_due_date = timestamp::now_seconds() + GRACE_PERIOD + 2592000;
 
-        // Get funds from lending pool and transfer to borrower
-        let borrowed_coins = lending_pool::borrow_for_payment<CoinType>(
+        // Get funds from lending pool - this deposits directly to borrower
+        lending_pool::borrow_for_payment(
             manager.lending_pool_addr,
             borrower_addr,
             amount
         );
-        coin::deposit(borrower_addr, borrowed_coins);
 
         event::emit(BorrowedEvent {
             borrower: borrower_addr,
@@ -359,14 +371,14 @@ module credit_protocol::credit_manager {
     }
 
     /// Borrow funds and pay directly to recipient
-    public entry fun borrow_and_pay<CoinType>(
+    public entry fun borrow_and_pay(
         borrower: &signer,
         manager_addr: address,
         recipient: address,
         amount: u64,
     ) acquires CreditManager {
         let borrower_addr = signer::address_of(borrower);
-        let manager = borrow_global_mut<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global_mut<CreditManager>(manager_addr);
 
         assert!(!manager.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
         assert!(amount > 0, error::invalid_argument(E_INVALID_AMOUNT));
@@ -391,23 +403,20 @@ module credit_protocol::credit_manager {
         );
 
         // Check available liquidity from lending pool
-        let available_liquidity = lending_pool::get_available_liquidity<CoinType>(manager.lending_pool_addr);
+        let available_liquidity = lending_pool::get_available_liquidity(manager.lending_pool_addr);
         assert!(available_liquidity >= amount, error::invalid_state(E_INSUFFICIENT_LIQUIDITY));
 
-        // Update credit line state first (checks-effects-interactions pattern)
+        // Update credit line state first
         credit_line.borrowed_amount = credit_line.borrowed_amount + amount;
         credit_line.last_borrowed_timestamp = timestamp::now_seconds();
         credit_line.repayment_due_date = timestamp::now_seconds() + GRACE_PERIOD + 2592000;
 
-        // Get funds from lending pool
-        let borrowed_coins = lending_pool::borrow_for_payment<CoinType>(
+        // Get funds from lending pool and send directly to recipient
+        lending_pool::borrow_for_payment(
             manager.lending_pool_addr,
-            borrower_addr,
+            recipient,
             amount
         );
-
-        // Transfer funds directly to recipient
-        coin::deposit(recipient, borrowed_coins);
 
         event::emit(DirectPaymentEvent {
             borrower: borrower_addr,
@@ -420,14 +429,14 @@ module credit_protocol::credit_manager {
     }
 
     /// Repay loan
-    public entry fun repay<CoinType>(
+    public entry fun repay(
         borrower: &signer,
         manager_addr: address,
         principal_amount: u64,
         interest_amount: u64,
     ) acquires CreditManager {
         let borrower_addr = signer::address_of(borrower);
-        let manager = borrow_global_mut<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global_mut<CreditManager>(manager_addr);
 
         assert!(!manager.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
         assert!(
@@ -454,16 +463,14 @@ module credit_protocol::credit_manager {
             error::invalid_argument(E_EXCEEDS_INTEREST)
         );
 
-        let total_repayment = principal_amount + interest_amount;
-
-        // Check if payment is on time (before state changes)
+        // Check if payment is on time
         let current_time = timestamp::now_seconds();
         let is_on_time = current_time <= credit_line.repayment_due_date;
 
         // Update credit line state first
         credit_line.borrowed_amount = credit_line.borrowed_amount - principal_amount;
         credit_line.interest_accrued = credit_line.interest_accrued - interest_amount;
-        credit_line.total_repaid = credit_line.total_repaid + total_repayment;
+        credit_line.total_repaid = credit_line.total_repaid + principal_amount + interest_amount;
 
         if (is_on_time) {
             credit_line.on_time_repayments = credit_line.on_time_repayments + 1;
@@ -471,19 +478,15 @@ module credit_protocol::credit_manager {
             credit_line.late_repayments = credit_line.late_repayments + 1;
         };
 
-        // Store remaining balance for event
         let remaining_balance = credit_line.borrowed_amount;
 
-        // Transfer repayment from borrower and send to lending pool
-        let repayment_coins = coin::withdraw<CoinType>(borrower, total_repayment);
-
         // Send repayment to lending pool with accounting update
-        lending_pool::receive_repayment<CoinType>(
+        lending_pool::receive_repayment(
             manager.lending_pool_addr,
             borrower_addr,
             principal_amount,
             interest_amount,
-            repayment_coins
+            borrower
         );
 
         // Update reputation in reputation manager
@@ -492,7 +495,7 @@ module credit_protocol::credit_manager {
             manager.reputation_manager_addr,
             borrower_addr,
             is_on_time,
-            total_repayment
+            principal_amount + interest_amount
         );
 
         // Check for credit limit increase only if debt is fully repaid
@@ -510,13 +513,13 @@ module credit_protocol::credit_manager {
     }
 
     /// Liquidate a borrower's position
-    public entry fun liquidate<CoinType>(
+    public entry fun liquidate(
         admin: &signer,
         manager_addr: address,
         borrower: address,
     ) acquires CreditManager {
         let admin_addr = signer::address_of(admin);
-        let manager = borrow_global_mut<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global_mut<CreditManager>(manager_addr);
 
         assert!(manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         assert!(
@@ -542,16 +545,10 @@ module credit_protocol::credit_manager {
             credit_line.collateral_deposited
         };
 
-        // Liquidate collateral (would call collateral vault module)
-        // collateral_vault::liquidate_collateral(manager.collateral_vault_addr, borrower, collateral_to_liquidate);
-
         // Update credit line
         credit_line.borrowed_amount = 0;
         credit_line.interest_accrued = 0;
         credit_line.collateral_deposited = credit_line.collateral_deposited - collateral_to_liquidate;
-
-        // Update reputation (negative impact)
-        // reputation_manager::record_default(manager.reputation_manager_addr, borrower, total_debt);
 
         if (credit_line.collateral_deposited == 0) {
             credit_line.is_active = false;
@@ -573,11 +570,11 @@ module credit_protocol::credit_manager {
     }
 
     /// Get credit information for a borrower
-    public fun get_credit_info<CoinType>(
+    public fun get_credit_info(
         manager_addr: address,
         borrower: address,
     ): (u64, u64, u64, u64, u64, u64, bool) acquires CreditManager {
-        let manager = borrow_global<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global<CreditManager>(manager_addr);
 
         if (table::contains(&manager.credit_lines, borrower)) {
             let credit_line = table::borrow(&manager.credit_lines, borrower);
@@ -599,11 +596,11 @@ module credit_protocol::credit_manager {
     }
 
     /// Get repayment history for a borrower
-    public fun get_repayment_history<CoinType>(
+    public fun get_repayment_history(
         manager_addr: address,
         borrower: address,
     ): (u64, u64, u64) acquires CreditManager {
-        let manager = borrow_global<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global<CreditManager>(manager_addr);
 
         if (table::contains(&manager.credit_lines, borrower)) {
             let credit_line = table::borrow(&manager.credit_lines, borrower);
@@ -614,11 +611,11 @@ module credit_protocol::credit_manager {
     }
 
     /// Check credit increase eligibility
-    public fun check_credit_increase_eligibility<CoinType>(
+    public fun check_credit_increase_eligibility(
         manager_addr: address,
         borrower: address,
     ): (bool, u64) acquires CreditManager {
-        let manager = borrow_global<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global<CreditManager>(manager_addr);
 
         if (!table::contains(&manager.credit_lines, borrower)) {
             return (false, 0)
@@ -629,7 +626,6 @@ module credit_protocol::credit_manager {
             return (false, 0)
         };
 
-        // Get actual reputation score from reputation manager
         let reputation_score = reputation_manager::get_reputation_score(
             manager.reputation_manager_addr,
             borrower
@@ -650,19 +646,19 @@ module credit_protocol::credit_manager {
     }
 
     /// Get all borrowers
-    public fun get_all_borrowers<CoinType>(manager_addr: address): vector<address> acquires CreditManager {
-        let manager = borrow_global<CreditManager<CoinType>>(manager_addr);
+    public fun get_all_borrowers(manager_addr: address): vector<address> acquires CreditManager {
+        let manager = borrow_global<CreditManager>(manager_addr);
         manager.borrowers_list
     }
 
     /// Withdraw excess collateral (when no outstanding debt)
-    public entry fun withdraw_collateral<CoinType>(
+    public entry fun withdraw_collateral(
         borrower: &signer,
         manager_addr: address,
         amount: u64,
     ) acquires CreditManager {
         let borrower_addr = signer::address_of(borrower);
-        let manager = borrow_global_mut<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global_mut<CreditManager>(manager_addr);
 
         assert!(!manager.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
         assert!(amount > 0, error::invalid_argument(E_INVALID_AMOUNT));
@@ -687,11 +683,12 @@ module credit_protocol::credit_manager {
 
         // Update credit line
         credit_line.collateral_deposited = credit_line.collateral_deposited - amount;
-        credit_line.credit_limit = credit_line.collateral_deposited; // Adjust credit limit proportionally
+        credit_line.credit_limit = credit_line.collateral_deposited;
 
-        // Transfer collateral back to borrower
-        let withdrawal_coins = coin::extract(&mut manager.collateral_reserve, amount);
-        coin::deposit(borrower_addr, withdrawal_coins);
+        // Transfer collateral back to borrower using dispatchable fungible asset
+        let manager_signer = object::generate_signer_for_extending(&manager.extend_ref);
+        let withdrawal_fa = dispatchable_fungible_asset::withdraw(&manager_signer, manager.token_store, amount);
+        dispatchable_fungible_asset::deposit(primary_fungible_store::ensure_primary_store_exists(borrower_addr, manager.token_metadata), withdrawal_fa);
 
         // Deactivate credit line if all collateral is withdrawn
         if (credit_line.collateral_deposited == 0) {
@@ -708,9 +705,9 @@ module credit_protocol::credit_manager {
     }
 
     /// Pause the credit manager
-    public entry fun pause<CoinType>(admin: &signer, manager_addr: address) acquires CreditManager {
+    public entry fun pause(admin: &signer, manager_addr: address) acquires CreditManager {
         let admin_addr = signer::address_of(admin);
-        let manager = borrow_global_mut<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global_mut<CreditManager>(manager_addr);
 
         assert!(manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         manager.is_paused = true;
@@ -722,9 +719,9 @@ module credit_protocol::credit_manager {
     }
 
     /// Unpause the credit manager
-    public entry fun unpause<CoinType>(admin: &signer, manager_addr: address) acquires CreditManager {
+    public entry fun unpause(admin: &signer, manager_addr: address) acquires CreditManager {
         let admin_addr = signer::address_of(admin);
-        let manager = borrow_global_mut<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global_mut<CreditManager>(manager_addr);
 
         assert!(manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         manager.is_paused = false;
@@ -736,18 +733,18 @@ module credit_protocol::credit_manager {
     }
 
     /// Initiate admin transfer (2-step process for security)
-    public entry fun transfer_admin<CoinType>(
+    public entry fun transfer_admin(
         admin: &signer,
         manager_addr: address,
         new_admin: address,
     ) acquires CreditManager {
         let admin_addr = signer::address_of(admin);
-        let manager = borrow_global_mut<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global_mut<CreditManager>(manager_addr);
 
         assert!(manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         assert!(new_admin != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
 
-        manager.pending_admin = std::option::some(new_admin);
+        manager.pending_admin = option::some(new_admin);
 
         event::emit(AdminTransferInitiatedEvent {
             current_admin: admin_addr,
@@ -757,22 +754,22 @@ module credit_protocol::credit_manager {
     }
 
     /// Accept admin transfer (must be called by pending admin)
-    public entry fun accept_admin<CoinType>(
+    public entry fun accept_admin(
         new_admin: &signer,
         manager_addr: address,
     ) acquires CreditManager {
         let new_admin_addr = signer::address_of(new_admin);
-        let manager = borrow_global_mut<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global_mut<CreditManager>(manager_addr);
 
-        assert!(std::option::is_some(&manager.pending_admin), error::invalid_state(E_PENDING_ADMIN_NOT_SET));
+        assert!(option::is_some(&manager.pending_admin), error::invalid_state(E_PENDING_ADMIN_NOT_SET));
         assert!(
-            *std::option::borrow(&manager.pending_admin) == new_admin_addr,
+            *option::borrow(&manager.pending_admin) == new_admin_addr,
             error::permission_denied(E_NOT_PENDING_ADMIN)
         );
 
         let old_admin = manager.admin;
         manager.admin = new_admin_addr;
-        manager.pending_admin = std::option::none();
+        manager.pending_admin = option::none();
 
         event::emit(AdminTransferCompletedEvent {
             old_admin,
@@ -782,19 +779,19 @@ module credit_protocol::credit_manager {
     }
 
     /// Cancel pending admin transfer
-    public entry fun cancel_admin_transfer<CoinType>(
+    public entry fun cancel_admin_transfer(
         admin: &signer,
         manager_addr: address,
     ) acquires CreditManager {
         let admin_addr = signer::address_of(admin);
-        let manager = borrow_global_mut<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global_mut<CreditManager>(manager_addr);
 
         assert!(manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
-        manager.pending_admin = std::option::none();
+        manager.pending_admin = option::none();
     }
 
     /// Update parameters with validation
-    public entry fun update_parameters<CoinType>(
+    public entry fun update_parameters(
         admin: &signer,
         manager_addr: address,
         fixed_interest_rate: u256,
@@ -802,12 +799,11 @@ module credit_protocol::credit_manager {
         credit_increase_multiplier: u256,
     ) acquires CreditManager {
         let admin_addr = signer::address_of(admin);
-        let manager = borrow_global_mut<CreditManager<CoinType>>(manager_addr);
+        let manager = borrow_global_mut<CreditManager>(manager_addr);
 
         assert!(manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
-        // Validate parameters
         assert!(fixed_interest_rate <= MAX_INTEREST_RATE, error::invalid_argument(E_INVALID_PARAMETERS));
-        assert!(reputation_threshold <= 1000, error::invalid_argument(E_INVALID_PARAMETERS)); // Max score is 1000
+        assert!(reputation_threshold <= 1000, error::invalid_argument(E_INVALID_PARAMETERS));
         assert!(
             credit_increase_multiplier >= BASIS_POINTS && credit_increase_multiplier <= MAX_CREDIT_MULTIPLIER,
             error::invalid_argument(E_INVALID_PARAMETERS)
@@ -826,12 +822,11 @@ module credit_protocol::credit_manager {
     }
 
     /// Internal function to update interest
-    fun update_interest_internal<CoinType>(manager: &mut CreditManager<CoinType>, borrower: address) {
+    fun update_interest_internal(manager: &mut CreditManager, borrower: address) {
         if (!table::contains(&manager.credit_lines, borrower)) {
             return
         };
 
-        // Calculate new interest first before borrowing mutably
         let new_interest = calculate_interest_internal(manager, borrower);
 
         let credit_line = table::borrow_mut(&mut manager.credit_lines, borrower);
@@ -842,7 +837,7 @@ module credit_protocol::credit_manager {
     }
 
     /// Internal function to calculate interest
-    fun calculate_interest_internal<CoinType>(manager: &CreditManager<CoinType>, borrower: address): u64 {
+    fun calculate_interest_internal(manager: &CreditManager, borrower: address): u64 {
         if (!table::contains(&manager.credit_lines, borrower)) {
             return 0
         };
@@ -852,14 +847,6 @@ module credit_protocol::credit_manager {
             return 0
         };
 
-        // Calculate interest using interest rate model (would call interest rate model module)
-        // let total_accrued = interest_rate_model::calculate_accrued_interest(
-        //     manager.interest_rate_model_addr,
-        //     credit_line.borrowed_amount,
-        //     credit_line.last_borrowed_timestamp
-        // );
-
-        // Simplified interest calculation for demonstration
         let current_time = timestamp::now_seconds();
         let time_elapsed = current_time - credit_line.last_interest_update;
         let annual_rate = manager.fixed_interest_rate;
@@ -885,8 +872,7 @@ module credit_protocol::credit_manager {
     }
 
     /// Internal function to check credit limit increase
-    fun check_credit_limit_increase_internal<CoinType>(manager: &mut CreditManager<CoinType>, borrower: address) {
-        // Check eligibility directly without acquiring global again
+    fun check_credit_limit_increase_internal(manager: &mut CreditManager, borrower: address) {
         if (!table::contains(&manager.credit_lines, borrower)) {
             return
         };
@@ -896,7 +882,6 @@ module credit_protocol::credit_manager {
             return
         };
 
-        // Get actual reputation score from reputation manager
         let reputation_score = reputation_manager::get_reputation_score(
             manager.reputation_manager_addr,
             borrower
@@ -926,23 +911,28 @@ module credit_protocol::credit_manager {
     }
 
     /// View functions
-    public fun is_paused<CoinType>(manager_addr: address): bool acquires CreditManager {
-        let manager = borrow_global<CreditManager<CoinType>>(manager_addr);
+    public fun is_paused(manager_addr: address): bool acquires CreditManager {
+        let manager = borrow_global<CreditManager>(manager_addr);
         manager.is_paused
     }
 
-    public fun get_admin<CoinType>(manager_addr: address): address acquires CreditManager {
-        let manager = borrow_global<CreditManager<CoinType>>(manager_addr);
+    public fun get_admin(manager_addr: address): address acquires CreditManager {
+        let manager = borrow_global<CreditManager>(manager_addr);
         manager.admin
     }
 
-    public fun get_lending_pool_addr<CoinType>(manager_addr: address): address acquires CreditManager {
-        let manager = borrow_global<CreditManager<CoinType>>(manager_addr);
+    public fun get_lending_pool_addr(manager_addr: address): address acquires CreditManager {
+        let manager = borrow_global<CreditManager>(manager_addr);
         manager.lending_pool_addr
     }
 
-    public fun get_fixed_interest_rate<CoinType>(manager_addr: address): u256 acquires CreditManager {
-        let manager = borrow_global<CreditManager<CoinType>>(manager_addr);
+    public fun get_fixed_interest_rate(manager_addr: address): u256 acquires CreditManager {
+        let manager = borrow_global<CreditManager>(manager_addr);
         manager.fixed_interest_rate
+    }
+
+    public fun get_token_metadata(manager_addr: address): Object<Metadata> acquires CreditManager {
+        let manager = borrow_global<CreditManager>(manager_addr);
+        manager.token_metadata
     }
 }

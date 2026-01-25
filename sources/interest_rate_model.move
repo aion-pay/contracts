@@ -112,15 +112,22 @@ module credit_protocol::interest_rate_model {
     }
 
     /// Initialize the interest rate model
+    /// Pass @0x0 for lending_pool_addr if not setting one
     public entry fun initialize(
         admin: &signer,
         credit_manager: address,
-        lending_pool: Option<address>,
+        lending_pool_addr: address,
     ) {
         let admin_addr = signer::address_of(admin);
 
         assert!(!exists<InterestRateModel>(admin_addr), error::already_exists(E_ALREADY_INITIALIZED));
         assert!(credit_manager != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
+
+        let lending_pool = if (lending_pool_addr == @0x0) {
+            option::none()
+        } else {
+            option::some(lending_pool_addr)
+        };
 
         let rate_params = RateParameters {
             base_rate: 1500,  // 15%
@@ -293,10 +300,11 @@ module credit_protocol::interest_rate_model {
     }
 
     /// Update lending pool address
+    /// Pass @0x0 to clear the lending pool
     public entry fun update_lending_pool(
         admin: &signer,
         model_addr: address,
-        new_lending_pool: Option<address>,
+        new_lending_pool_addr: address,
     ) acquires InterestRateModel {
         let admin_addr = signer::address_of(admin);
         let model = borrow_global_mut<InterestRateModel>(model_addr);
@@ -304,6 +312,11 @@ module credit_protocol::interest_rate_model {
         assert!(model.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
 
         let old_pool = model.lending_pool;
+        let new_lending_pool = if (new_lending_pool_addr == @0x0) {
+            option::none()
+        } else {
+            option::some(new_lending_pool_addr)
+        };
         model.lending_pool = new_lending_pool;
 
         event::emit(LendingPoolUpdatedEvent {

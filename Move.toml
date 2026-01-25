@@ -4,7 +4,7 @@ version = "1.0.0"
 authors = ["Credit Protocol Team"]
 
 [addresses]
-credit_protocol = "_"
+credit_protocol = "0x76af9a325f2a8be63c009dc9a260cf3476972c68f0e56dcdb00b39a2a8b75fde"
 
 [dev-addresses]
 credit_protocol = "0x7dab2b468867d46e5a1968ffa045d1308b010e6e1eece081172c72c3f35c4f5e"

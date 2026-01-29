@@ -2,15 +2,35 @@
 
 ## 🎯 Overview
 **Status:** ✅ **FULLY FUNCTIONAL WITH DIRECT PAYMENT FEATURE**
-**Network:** Aptos Testnet
-**Account:** `0x7dab2b468867d46e5a1968ffa045d1308b010e6e1eece081172c72c3f35c4f5e`
-**Last Updated:** 2025-09-24
-**Latest Deployment:** `0xee18ac778e388aebaa3beb225e3dcb018b0c7a54197838477366e0f165459009`
 **Testing Status:** All functions tested + NEW direct payment functionality verified ✅
 
 🆕 **NEW FEATURE:** Direct Payment Functionality - Borrow and pay directly to recipients!
 
 This comprehensive guide provides everything needed for integrating with the fully tested DeFi Credit Protocol with enhanced payment capabilities.
+
+---
+
+## 🌐 Mainnet Deployment (Production) - RECOMMENDED
+
+| Component | Address |
+|-----------|---------|
+| **Contract Package** | `0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172` |
+| **Admin Address** | `0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78` |
+| **Circle USDC Token** | `0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b` |
+| **RPC Endpoint** | `https://fullnode.mainnet.aptoslabs.com` |
+
+**Status:** ✅ Live and tested with real Circle USDC (January 2026)
+
+> **For mainnet integration, see:** [MAINNET_INTEGRATION_GUIDE.md](./MAINNET_INTEGRATION_GUIDE.md)
+
+---
+
+## 🧪 Testnet Deployment (Development)
+
+**Network:** Aptos Testnet
+**Account:** `0x7dab2b468867d46e5a1968ffa045d1308b010e6e1eece081172c72c3f35c4f5e`
+**Last Updated:** 2025-09-24
+**Latest Deployment:** `0xee18ac778e388aebaa3beb225e3dcb018b0c7a54197838477366e0f165459009`
 
 ---
 

@@ -15,11 +15,31 @@
 
 ## 🎯 Overview
 
-This guide provides complete documentation for integrating with the DeFi Credit Protocol deployed on Aptos Testnet. The protocol consists of 5 interconnected Move modules that replicate the functionality of the original Solidity contracts.
+This guide provides complete documentation for integrating with the DeFi Credit Protocol deployed on Aptos. The protocol consists of 5 interconnected Move modules that replicate the functionality of the original Solidity contracts.
+
+**Package Name:** `credit_protocol`
+
+---
+
+## 🌐 Mainnet Deployment (Production)
+
+| Component | Address |
+|-----------|---------|
+| **Contract Package** | `0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172` |
+| **Admin Address** | `0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78` |
+| **Circle USDC Token** | `0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b` |
+| **RPC Endpoint** | `https://fullnode.mainnet.aptoslabs.com` |
+
+**Status:** ✅ Live and tested with real USDC
+
+> **Note:** For detailed mainnet integration, see [MAINNET_INTEGRATION_GUIDE.md](./MAINNET_INTEGRATION_GUIDE.md)
+
+---
+
+## 🧪 Testnet Deployment (Development)
 
 **Network:** Aptos Testnet
 **Account Address:** `0x7dab2b468867d46e5a1968ffa045d1308b010e6e1eece081172c72c3f35c4f5e`
-**Package Name:** `credit_protocol`
 
 ---
 

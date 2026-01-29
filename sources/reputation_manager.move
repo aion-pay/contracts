@@ -270,6 +270,7 @@ module credit_protocol::reputation_manager {
         });
     }
 
+    #[view]
     /// Get reputation score for a user
     public fun get_reputation_score(manager_addr: address, user: address): u256 acquires ReputationManager {
         let rep_manager = borrow_global<ReputationManager>(manager_addr);
@@ -282,6 +283,7 @@ module credit_protocol::reputation_manager {
         }
     }
 
+    #[view]
     /// Get reputation tier for a user
     public fun get_tier(manager_addr: address, user: address): u8 acquires ReputationManager {
         let rep_manager = borrow_global<ReputationManager>(manager_addr);
@@ -294,6 +296,7 @@ module credit_protocol::reputation_manager {
         }
     }
 
+    #[view]
     /// Get complete reputation data for a user
     public fun get_reputation_data(
         manager_addr: address,
@@ -318,6 +321,7 @@ module credit_protocol::reputation_manager {
         }
     }
 
+    #[view]
     /// Get all users in the system
     public fun get_all_users(manager_addr: address): vector<address> acquires ReputationManager {
         let rep_manager = borrow_global<ReputationManager>(manager_addr);
@@ -533,21 +537,25 @@ module credit_protocol::reputation_manager {
     }
 
     /// View functions
+    #[view]
     public fun is_paused(manager_addr: address): bool acquires ReputationManager {
         let rep_manager = borrow_global<ReputationManager>(manager_addr);
         rep_manager.is_paused
     }
 
+    #[view]
     public fun get_admin(manager_addr: address): address acquires ReputationManager {
         let rep_manager = borrow_global<ReputationManager>(manager_addr);
         rep_manager.admin
     }
 
+    #[view]
     public fun get_credit_manager(manager_addr: address): address acquires ReputationManager {
         let rep_manager = borrow_global<ReputationManager>(manager_addr);
         rep_manager.credit_manager
     }
 
+    #[view]
     public fun get_parameters(
         manager_addr: address,
     ): (u256, u256, u256, u256) acquires ReputationManager {
@@ -560,16 +568,19 @@ module credit_protocol::reputation_manager {
         )
     }
 
+    #[view]
     public fun get_tier_thresholds(): (u256, u256, u256, u256, u256) {
         (MIN_SCORE, BRONZE_THRESHOLD, SILVER_THRESHOLD, GOLD_THRESHOLD, MAX_SCORE)
     }
 
+    #[view]
     /// Get user count
     public fun get_user_count(manager_addr: address): u64 acquires ReputationManager {
         let rep_manager = borrow_global<ReputationManager>(manager_addr);
         vector::length(&rep_manager.users_list)
     }
 
+    #[view]
     /// Check if user is initialized
     public fun is_user_initialized(manager_addr: address, user: address): bool acquires ReputationManager {
         let rep_manager = borrow_global<ReputationManager>(manager_addr);

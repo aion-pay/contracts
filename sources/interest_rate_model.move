@@ -152,6 +152,7 @@ module credit_protocol::interest_rate_model {
         move_to(admin, interest_rate_model);
     }
 
+    #[view]
     /// Get the current annual rate
     public fun get_annual_rate(model_addr: address): u256 acquires InterestRateModel {
         let model = borrow_global<InterestRateModel>(model_addr);
@@ -188,6 +189,7 @@ module credit_protocol::interest_rate_model {
         });
     }
 
+    #[view]
     /// Calculate accrued interest for a loan
     public fun calculate_accrued_interest(
         model_addr: address,
@@ -326,6 +328,7 @@ module credit_protocol::interest_rate_model {
         });
     }
 
+    #[view]
     /// Check if grace period has ended
     public fun is_grace_period_ended(
         model_addr: address,
@@ -337,6 +340,7 @@ module credit_protocol::interest_rate_model {
         timestamp::now_seconds() > borrow_timestamp + model.grace_period
     }
 
+    #[view]
     /// Get remaining grace period
     public fun get_remaining_grace_period(
         model_addr: address,
@@ -355,6 +359,7 @@ module credit_protocol::interest_rate_model {
         }
     }
 
+    #[view]
     /// Calculate interest for a specific period
     public fun calculate_interest_for_period(
         principal: u256,
@@ -369,6 +374,7 @@ module credit_protocol::interest_rate_model {
         (principal * daily_rate * (time_elapsed as u256)) / PRECISION
     }
 
+    #[view]
     /// Get rate parameters
     public fun get_rate_parameters(model_addr: address): RateParameters acquires InterestRateModel {
         let model = borrow_global<InterestRateModel>(model_addr);
@@ -491,16 +497,19 @@ module credit_protocol::interest_rate_model {
     }
 
     /// View functions
+    #[view]
     public fun get_grace_period(model_addr: address): u64 acquires InterestRateModel {
         let model = borrow_global<InterestRateModel>(model_addr);
         model.grace_period
     }
 
+    #[view]
     public fun is_paused(model_addr: address): bool acquires InterestRateModel {
         let model = borrow_global<InterestRateModel>(model_addr);
         model.is_paused
     }
 
+    #[view]
     public fun get_admin(model_addr: address): address acquires InterestRateModel {
         let model = borrow_global<InterestRateModel>(model_addr);
         model.admin

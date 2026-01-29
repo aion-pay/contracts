@@ -1,97 +1,49 @@
-# Credit Protocol - Move Migration CTRL + MOVE HACKATHON
+# AION Credit Protocol - Aptos Mainnet
 
-This directory contains the Credit Protocol smart contracts Move (Aptos).
+A decentralized credit protocol built on Aptos blockchain using the Move programming language. The protocol enables overcollateralized lending with USDC, featuring a reputation-based credit system.
+
+## Mainnet Deployment
+
+### Contract Addresses
+
+| Contract | Address |
+|----------|---------|
+| **Protocol (All Modules)** | `0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172` |
+| **Admin** | `0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78` |
+| **USDC Token (Metadata)** | `0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b` |
+
+### Explorer Links
+
+- **Contract:** [View on Explorer](https://explorer.aptoslabs.com/object/0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172?network=mainnet)
+- **Deployment Tx:** [View Transaction](https://explorer.aptoslabs.com/txn/0xf636c220bbac036aafcff5d6eba2ef52569a81dee65ed97ae6abf6202bf54163?network=mainnet)
+
+### Module Addresses
+
+All modules are deployed under the protocol address. Access them using:
+
+```
+0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::credit_manager
+0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::lending_pool
+0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::collateral_vault
+0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::reputation_manager
+0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::interest_rate_model
+```
+
+### Initialization Transactions
+
+| Module | Transaction Hash |
+|--------|------------------|
+| interest_rate_model | `0xf16be1090c4911d457a8aff5d0082e7a2e6d38b440fd3cc840e1652cf59beae3` |
+| reputation_manager | `0x8e09d15a0ba458fc24ac6776695fe0a008d63dc896231118e5a3d2f048e705b2` |
+| lending_pool | `0xe18de65db63dcd58d155161e22552a35902be761c5bc78be13178d1ea6caafdb` |
+| collateral_vault | `0xbbb998bbc3f7ec3f31155b5ec8dc7d3f0242161bd212ea9ae875a11b616eda2a` |
+| credit_manager | `0x625455aa42404cbe14bb7de99badc3b10667d200cc833791221c9f06e5e30cf8` |
+
+---
 
 ## Architecture
 
 The protocol consists of 5 main modules:
-
-### 1. Interest Rate Model (`interest_rate_model.move`)
-- Manages interest rate calculations (fixed and dynamic rates)
-- Handles grace periods and interest accrual
-- Supports both time-based and utilization-based rate models
-
-### 2. Lending Pool (`lending_pool.move`)
-- Manages liquidity deposits and withdrawals from lenders
-- Handles borrowing and repayment flows
-- Distributes interest to lenders and collects protocol fees
-- Tracks utilization rates
-
-### 3. Collateral Vault (`collateral_vault.move`)
-- Manages borrower collateral deposits
-- Handles collateral locking/unlocking
-- Supports liquidation mechanisms
-- Tracks collateral status (Active, Locked, Liquidating)
-
-### 4. Reputation Manager (`reputation_manager.move`)
-- Tracks borrower credit scores and payment history
-- Manages reputation tiers (Bronze, Silver, Gold, Platinum)
-- Records defaults and payment behavior
-- Updates scores based on repayment patterns
-
-### 5. Credit Manager (`credit_manager.move`)
-- Core orchestration layer
-- Manages credit line creation and management
-- Handles borrowing, repayment, and liquidation logic
-- Integrates with all other modules
-- Manages credit limit increases based on reputation
-
-## Key Features
-
-### Move-Specific Improvements
-- **Resource-based Architecture**: Uses Move's resource model for better safety
-- **Event System**: Comprehensive event emission for all major actions
-- **Access Control**: Granular permission system using Move's safety features
-- **Error Handling**: Detailed error codes and assertions
-- **Gas Efficiency**: Optimized for Aptos transaction costs
-
-### Protocol Features
-- **Overcollateralized Lending**: Users deposit collateral to borrow
-- **Dynamic Interest Rates**: Rates adjust based on pool utilization
-- **Reputation System**: Credit scores improve with good payment history
-- **Automated Liquidations**: Protocol automatically liquidates unhealthy positions
-- **Protocol Fees**: Built-in fee mechanism for sustainability
-
-## Deployment
-
-1. **Compile the contracts:**
-```bash
-aptos move compile --dev
-```
-
-2. **Deploy using the deployment script:**
-```bash
-aptos move run --function-id 0x42::deploy::deploy_credit_protocol --args address:YOUR_ADDRESS
-```
-
-3. **Initialize individual modules if needed:**
-```bash
-# Initialize Interest Rate Model
-aptos move run --function-id 0x42::interest_rate_model::initialize --args address:ADMIN address:CREDIT_MANAGER
-
-# Initialize other modules similarly...
-```
-
-## Usage
-
-### For Lenders
-1. **Deposit funds:** Call `lending_pool::deposit()`
-2. **Earn interest:** Interest is distributed automatically
-3. **Withdraw:** Call `lending_pool::withdraw()`
-
-### For Borrowers
-1. **Open credit line:** Call `credit_manager::open_credit_line()` with collateral
-2. **Borrow funds:** Call `credit_manager::borrow()` up to credit limit
-3. **Repay loan:** Call `credit_manager::repay()` with principal and interest
-4. **Build reputation:** Make on-time payments to improve credit score
-
-### For Administrators
-- **Pause/unpause** any module for emergency stops
-- **Update parameters** like interest rates and collateral ratios
-- **Liquidate** unhealthy positions
-- **Withdraw protocol fees**
-
-## Module Interactions
 
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
@@ -101,82 +53,330 @@ aptos move run --function-id 0x42::interest_rate_model::initialize --args addres
          │                       │                       │
          └───────────────────────┼───────────────────────┘
                                  │
-                    ┌─────────────────┐
-                    │  Credit Manager │  ←─────────────────┐
-                    │   (Orchestrator) │                    │
-                    └─────────────────┘                    │
-                                 │                         │
-                    ┌─────────────────┐                    │
-                    │  Lending Pool   │ ───────────────────┘
-                    │   (Liquidity)   │
-                    └─────────────────┘
+                    ┌─────────────────────┐
+                    │   Credit Manager    │
+                    │   (Orchestrator)    │
+                    └─────────────────────┘
+                                 │
+                    ┌─────────────────────┐
+                    │    Lending Pool     │
+                    │    (Liquidity)      │
+                    └─────────────────────┘
 ```
+
+### 1. Credit Manager (`credit_manager`)
+- Core orchestration layer for the protocol
+- Manages credit line creation and lifecycle
+- Handles borrowing, repayment, and liquidation logic
+- Integrates with all other modules
+- Manages credit limit increases based on reputation
+
+### 2. Lending Pool (`lending_pool`)
+- Manages liquidity deposits and withdrawals from lenders
+- Handles borrowing and repayment flows
+- Distributes interest to lenders proportionally
+- Collects protocol fees (10% of interest)
+- Tracks utilization rates
+
+### 3. Collateral Vault (`collateral_vault`)
+- Manages borrower collateral deposits
+- Handles collateral locking/unlocking
+- Supports liquidation mechanisms
+- Configurable collateralization ratio (default 150%)
+- Liquidation threshold (default 120%)
+
+### 4. Reputation Manager (`reputation_manager`)
+- Tracks borrower credit scores (0-1000)
+- Records on-time vs late payments
+- Manages reputation tiers (Bronze, Silver, Gold, Platinum)
+- Enables credit limit increases based on good behavior
+
+### 5. Interest Rate Model (`interest_rate_model`)
+- Manages interest rate calculations
+- Default fixed rate: 15% APR
+- Configurable grace period (default 30 days)
+- Supports both fixed and dynamic rate models
+
+---
+
+## Token Standard
+
+The protocol uses the **Aptos Fungible Asset Standard** with support for **Dispatchable Tokens**. This enables compatibility with:
+- Native USDC on Aptos
+- Any fungible asset following the Aptos FA standard
+
+---
+
+## Integration Guide
+
+### For Frontend/SDK Integration
+
+#### Constants
+```typescript
+const PROTOCOL_ADDRESS = "0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172";
+const ADMIN_ADDRESS = "0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78";
+const USDC_METADATA = "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b";
+```
+
+### For Lenders
+
+#### 1. Deposit USDC to Lending Pool
+```bash
+aptos move run \
+  --function-id 0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::lending_pool::deposit \
+  --args address:0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78 u64:<amount_in_micro_usdc>
+```
+
+#### 2. Withdraw from Lending Pool
+```bash
+aptos move run \
+  --function-id 0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::lending_pool::withdraw \
+  --args address:0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78 u64:<amount_in_micro_usdc>
+```
+
+#### 3. View Lender Info
+```bash
+aptos move view \
+  --function-id 0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::lending_pool::get_lender_info \
+  --args address:0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78 address:<lender_address>
+```
+
+### For Borrowers
+
+#### 1. Open Credit Line (with collateral)
+```bash
+aptos move run \
+  --function-id 0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::credit_manager::open_credit_line \
+  --args address:0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78 u64:<collateral_amount>
+```
+
+#### 2. Add More Collateral
+```bash
+aptos move run \
+  --function-id 0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::credit_manager::add_collateral \
+  --args address:0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78 u64:<amount>
+```
+
+#### 3. Borrow USDC
+```bash
+aptos move run \
+  --function-id 0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::credit_manager::borrow \
+  --args address:0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78 u64:<amount>
+```
+
+#### 4. Borrow and Pay Directly to Recipient
+```bash
+aptos move run \
+  --function-id 0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::credit_manager::borrow_and_pay \
+  --args address:0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78 address:<recipient> u64:<amount>
+```
+
+#### 5. Repay Loan
+```bash
+aptos move run \
+  --function-id 0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::credit_manager::repay \
+  --args address:0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78 u64:<principal_amount> u64:<interest_amount>
+```
+
+#### 6. Withdraw Collateral (after repaying debt)
+```bash
+aptos move run \
+  --function-id 0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::credit_manager::withdraw_collateral \
+  --args address:0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78 u64:<amount>
+```
+
+#### 7. View Credit Info
+```bash
+aptos move view \
+  --function-id 0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::credit_manager::get_credit_info \
+  --args address:0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78 address:<borrower_address>
+```
+
+Returns: `(collateral_deposited, credit_limit, borrowed_amount, interest_accrued, total_debt, repayment_due_date, is_active)`
+
+---
+
+## View Functions
+
+### Lending Pool
+| Function | Returns |
+|----------|---------|
+| `get_available_liquidity(pool_addr)` | Available USDC for borrowing |
+| `get_utilization_rate(pool_addr)` | Pool utilization in basis points |
+| `get_total_deposited(pool_addr)` | Total deposits |
+| `get_total_borrowed(pool_addr)` | Total borrowed |
+| `get_lender_info(pool_addr, lender)` | (deposited, earned_interest, timestamp) |
+
+### Credit Manager
+| Function | Returns |
+|----------|---------|
+| `get_credit_info(manager_addr, borrower)` | Full credit line details |
+| `get_repayment_history(manager_addr, borrower)` | (on_time, late, total_repaid) |
+| `check_credit_increase_eligibility(manager_addr, borrower)` | (eligible, new_limit) |
+
+### Reputation Manager
+| Function | Returns |
+|----------|---------|
+| `get_reputation_score(manager_addr, user)` | Score (0-1000) |
+| `get_reputation_tier(manager_addr, user)` | Tier (0-3) |
+
+### Collateral Vault
+| Function | Returns |
+|----------|---------|
+| `get_collateral_balance(vault_addr, user)` | Collateral amount |
+| `get_user_collateral(vault_addr, user)` | (amount, locked, available, status) |
+
+---
+
+## Protocol Parameters
+
+### Interest Rate Model
+| Parameter | Default Value |
+|-----------|---------------|
+| Base Rate | 15% APR (1500 basis points) |
+| Max Rate | 20% APR |
+| Penalty Rate | 30% APR |
+| Grace Period | 30 days |
+
+### Credit Manager
+| Parameter | Default Value |
+|-----------|---------------|
+| Fixed Interest Rate | 15% APR |
+| Reputation Threshold | 750 (for credit increase) |
+| Credit Increase Multiplier | 120% |
+| Min Collateral | 1 USDC |
+| Min Borrow | 0.1 USDC |
+
+### Collateral Vault
+| Parameter | Default Value |
+|-----------|---------------|
+| Collateralization Ratio | 150% |
+| Liquidation Threshold | 120% |
+| Max Collateral | 1,000,000 USDC |
+
+### Lending Pool
+| Parameter | Default Value |
+|-----------|---------------|
+| Protocol Fee | 10% of interest |
+| Min Deposit | 1 USDC |
+
+---
+
+## Events
+
+The protocol emits events for all major actions:
+
+### Credit Manager Events
+- `CreditOpenedEvent` - Credit line opened
+- `BorrowedEvent` - Funds borrowed
+- `DirectPaymentEvent` - Borrow and pay to recipient
+- `RepaidEvent` - Loan repaid
+- `LiquidatedEvent` - Position liquidated
+- `CreditLimitIncreasedEvent` - Credit limit increased
+- `CollateralAddedEvent` - Collateral added
+- `CollateralWithdrawnEvent` - Collateral withdrawn
+
+### Lending Pool Events
+- `DepositEvent` - Funds deposited
+- `WithdrawEvent` - Funds withdrawn
+- `BorrowEvent` - Funds borrowed
+- `RepayEvent` - Loan repaid
+
+### Reputation Manager Events
+- `ReputationInitializedEvent` - User reputation initialized
+- `ReputationUpdatedEvent` - Score updated
+- `TierChangedEvent` - Tier changed
+
+---
 
 ## Security Features
 
-- **Reentrancy Protection**: Move's resource model prevents reentrancy attacks
-- **Access Control**: Role-based permissions for sensitive operations
-- **Pausable**: Emergency stop functionality in all modules
+- **Move Resource Model**: Prevents reentrancy and ensures asset safety
+- **Two-Step Admin Transfer**: Secure admin ownership changes
+- **Pausable Modules**: Emergency stop functionality
+- **Access Control**: Role-based permissions
 - **Parameter Validation**: Comprehensive input validation
-- **Safe Math**: Move's built-in overflow protection
+- **Overflow Protection**: Move's built-in safe math
 
-## Testing
+---
 
-Create test files in `tests/` directory:
+## Admin Functions
 
-```move
-#[test_only]
-module credit_protocol::test_credit_manager {
-    use credit_protocol::credit_manager;
-    // Add test functions here
-}
+### Pause/Unpause (Emergency)
+```bash
+# Pause
+aptos move run --function-id <module>::pause --args address:<module_addr>
+
+# Unpause
+aptos move run --function-id <module>::unpause --args address:<module_addr>
 ```
 
-Run tests:
+### Transfer Admin (Two-Step)
+```bash
+# Step 1: Initiate transfer
+aptos move run --function-id <module>::transfer_admin --args address:<module_addr> address:<new_admin>
+
+# Step 2: New admin accepts
+aptos move run --function-id <module>::accept_admin --args address:<module_addr>
+```
+
+### Update Parameters
+```bash
+# Update credit manager parameters
+aptos move run \
+  --function-id 0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::credit_manager::update_parameters \
+  --args address:<manager_addr> u256:<interest_rate> u256:<reputation_threshold> u256:<credit_multiplier>
+```
+
+---
+
+## Development
+
+### Compile
+```bash
+aptos move compile
+```
+
+### Test
 ```bash
 aptos move test
 ```
 
-## Differences from Solidity Version
+### Deploy (New Instance)
+```bash
+# Set address to "_" in Move.toml first
+aptos move deploy-object --address-name credit_protocol
+```
 
-### Technical Differences
-- **No Upgradeable Contracts**: Move uses a different upgrade pattern
-- **Resource Model**: Assets are represented as resources, not mappings
-- **Event System**: Events are emitted using Move's native event system
-- **Error Handling**: Uses Move's `error` module instead of `require` statements
+---
 
-### Token Differences
-- **AptosCoin Usage**: Currently uses AptosCoin as placeholder for USDC
-- **Coin Standard**: Uses Aptos Coin standard instead of ERC-20
-- **Native Integration**: Better integration with Aptos native features
+## USDC on Aptos
 
-### Gas Optimization
-- **Batch Operations**: More efficient batch processing
-- **Resource Efficiency**: Move's resource model reduces storage costs
-- **Parallel Execution**: Aptos supports parallel transaction execution
+### Mainnet USDC
+- **Metadata Address:** `0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b`
+- **Decimals:** 6
+- **Standard:** Aptos Fungible Asset (with Dispatchable hooks)
 
-## Configuration
+### Testnet USDC
+- **Metadata Address:** `0x69091fbab5f7d635ee7ac5098cf0c1efbe31d68fec0f2cd565e8d168daf52832`
 
-Key parameters can be configured:
-- Interest rates (base, max, penalty)
-- Grace periods
-- Collateralization ratios
-- Reputation scoring parameters
-- Protocol fee rates
+---
 
-## Future Enhancements
+## Amount Conversions
 
-- **Multi-Asset Support**: Support for multiple collateral types
-- **Flash Loans**: Add flash loan functionality
-- **Governance**: Decentralized parameter management
-- **Oracle Integration**: External price feeds for collateral valuation
-- **Cross-Chain**: Bridge functionality for multi-chain lending
+USDC has 6 decimals:
+- 1 USDC = 1,000,000 (micro USDC)
+- 0.1 USDC = 100,000
+- 0.01 USDC = 10,000
+
+---
+
+## License
+
+MIT License
+
+---
 
 ## Support
 
-For questions or issues:
-1. Check the test files for usage examples
-2. Review the inline documentation in each module
-3. Examine the event structures for debugging
-
-This migration maintains all the core functionality of the original Solidity contracts while leveraging Move's unique features for enhanced security and efficiency.
+For questions or issues, please open an issue in this repository.

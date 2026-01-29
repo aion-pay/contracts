@@ -578,6 +578,7 @@ module credit_protocol::collateral_vault {
         vault.pending_admin = option::none();
     }
 
+    #[view]
     /// Get collateral balance for a user
     public fun get_collateral_balance(vault_addr: address, user: address): u64 acquires CollateralVault {
         let vault = borrow_global<CollateralVault>(vault_addr);
@@ -589,6 +590,7 @@ module credit_protocol::collateral_vault {
         }
     }
 
+    #[view]
     /// Get user collateral details
     public fun get_user_collateral(
         vault_addr: address,
@@ -604,6 +606,7 @@ module credit_protocol::collateral_vault {
         }
     }
 
+    #[view]
     /// Get all users
     public fun get_all_users(vault_addr: address): vector<address> acquires CollateralVault {
         let vault = borrow_global<CollateralVault>(vault_addr);
@@ -627,41 +630,49 @@ module credit_protocol::collateral_vault {
     }
 
     /// View functions
+    #[view]
     public fun get_total_collateral(vault_addr: address): u64 acquires CollateralVault {
         let vault = borrow_global<CollateralVault>(vault_addr);
         vault.total_collateral
     }
 
+    #[view]
     public fun get_collateralization_ratio(vault_addr: address): u256 acquires CollateralVault {
         let vault = borrow_global<CollateralVault>(vault_addr);
         vault.collateralization_ratio
     }
 
+    #[view]
     public fun get_liquidation_threshold(vault_addr: address): u256 acquires CollateralVault {
         let vault = borrow_global<CollateralVault>(vault_addr);
         vault.liquidation_threshold
     }
 
+    #[view]
     public fun get_max_collateral_amount(vault_addr: address): u64 acquires CollateralVault {
         let vault = borrow_global<CollateralVault>(vault_addr);
         vault.max_collateral_amount
     }
 
+    #[view]
     public fun is_paused(vault_addr: address): bool acquires CollateralVault {
         let vault = borrow_global<CollateralVault>(vault_addr);
         vault.is_paused
     }
 
+    #[view]
     public fun get_admin(vault_addr: address): address acquires CollateralVault {
         let vault = borrow_global<CollateralVault>(vault_addr);
         vault.admin
     }
 
+    #[view]
     public fun get_credit_manager(vault_addr: address): address acquires CollateralVault {
         let vault = borrow_global<CollateralVault>(vault_addr);
         vault.credit_manager
     }
 
+    #[view]
     public fun get_token_metadata(vault_addr: address): Object<Metadata> acquires CollateralVault {
         let vault = borrow_global<CollateralVault>(vault_addr);
         vault.token_metadata

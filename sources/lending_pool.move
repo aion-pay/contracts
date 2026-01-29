@@ -332,6 +332,7 @@ module credit_protocol::lending_pool {
         });
     }
 
+    #[view]
     /// Get available liquidity in the pool
     public fun get_available_liquidity(pool_addr: address): u64 acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
@@ -343,6 +344,7 @@ module credit_protocol::lending_pool {
         }
     }
 
+    #[view]
     /// Get utilization rate of the pool
     public fun get_utilization_rate(pool_addr: address): u256 acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
@@ -357,6 +359,7 @@ module credit_protocol::lending_pool {
         ((current_borrowed as u256) * BASIS_POINTS) / (pool.total_deposited as u256)
     }
 
+    #[view]
     /// Get lender information
     public fun get_lender_info(
         pool_addr: address,
@@ -426,6 +429,7 @@ module credit_protocol::lending_pool {
         dispatchable_fungible_asset::deposit(primary_fungible_store::ensure_primary_store_exists(to, pool.token_metadata), fa);
     }
 
+    #[view]
     /// Get all lenders
     public fun get_all_lenders(pool_addr: address): vector<address> acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
@@ -553,6 +557,7 @@ module credit_protocol::lending_pool {
         };
     }
 
+    #[view]
     /// Get token metadata address
     public fun get_token_metadata(pool_addr: address): Object<Metadata> acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
@@ -560,36 +565,43 @@ module credit_protocol::lending_pool {
     }
 
     /// View functions
+    #[view]
     public fun get_total_deposited(pool_addr: address): u64 acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
         pool.total_deposited
     }
 
+    #[view]
     public fun get_total_borrowed(pool_addr: address): u64 acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
         pool.total_borrowed
     }
 
+    #[view]
     public fun get_total_repaid(pool_addr: address): u64 acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
         pool.total_repaid
     }
 
+    #[view]
     public fun get_protocol_fees_collected(pool_addr: address): u64 acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
         pool.protocol_fees_collected
     }
 
+    #[view]
     public fun is_paused(pool_addr: address): bool acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
         pool.is_paused
     }
 
+    #[view]
     public fun get_admin(pool_addr: address): address acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
         pool.admin
     }
 
+    #[view]
     public fun get_credit_manager(pool_addr: address): address acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
         pool.credit_manager

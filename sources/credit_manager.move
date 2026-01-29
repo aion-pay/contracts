@@ -569,6 +569,7 @@ module credit_protocol::credit_manager {
         });
     }
 
+    #[view]
     /// Get credit information for a borrower
     public fun get_credit_info(
         manager_addr: address,
@@ -595,6 +596,7 @@ module credit_protocol::credit_manager {
         }
     }
 
+    #[view]
     /// Get repayment history for a borrower
     public fun get_repayment_history(
         manager_addr: address,
@@ -610,6 +612,7 @@ module credit_protocol::credit_manager {
         }
     }
 
+    #[view]
     /// Check credit increase eligibility
     public fun check_credit_increase_eligibility(
         manager_addr: address,
@@ -645,6 +648,7 @@ module credit_protocol::credit_manager {
         (eligible, new_limit)
     }
 
+    #[view]
     /// Get all borrowers
     public fun get_all_borrowers(manager_addr: address): vector<address> acquires CreditManager {
         let manager = borrow_global<CreditManager>(manager_addr);
@@ -911,26 +915,31 @@ module credit_protocol::credit_manager {
     }
 
     /// View functions
+    #[view]
     public fun is_paused(manager_addr: address): bool acquires CreditManager {
         let manager = borrow_global<CreditManager>(manager_addr);
         manager.is_paused
     }
 
+    #[view]
     public fun get_admin(manager_addr: address): address acquires CreditManager {
         let manager = borrow_global<CreditManager>(manager_addr);
         manager.admin
     }
 
+    #[view]
     public fun get_lending_pool_addr(manager_addr: address): address acquires CreditManager {
         let manager = borrow_global<CreditManager>(manager_addr);
         manager.lending_pool_addr
     }
 
+    #[view]
     public fun get_fixed_interest_rate(manager_addr: address): u256 acquires CreditManager {
         let manager = borrow_global<CreditManager>(manager_addr);
         manager.fixed_interest_rate
     }
 
+    #[view]
     public fun get_token_metadata(manager_addr: address): Object<Metadata> acquires CreditManager {
         let manager = borrow_global<CreditManager>(manager_addr);
         manager.token_metadata

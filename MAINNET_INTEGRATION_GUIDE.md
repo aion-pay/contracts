@@ -1,31 +1,41 @@
-# AION Credit Protocol - Mainnet Integration Guide v3.1
+# AION Credit Protocol - Mainnet Integration Guide v4.0
 
 ## Overview
 
-**Status:** ✅ **LIVE ON APTOS MAINNET**
+**Status:** **LIVE ON APTOS MAINNET**
 **Network:** Aptos Mainnet
 **Token:** Circle USDC (Native Fungible Asset)
 **Last Updated:** February 2026
-**Contract Version:** v1.0.1 (Upgrade: `0xb1cf94d4a7a8f6b2279885524794990394e62ac026339135aa637228847c2906`)
-**Testing Status:** All functions verified with real USDC ✅
+**Contract Version:** v2.0.0 (Collateral-Earns-Interest Update)
+**Testing Status:** All functions verified with real USDC
 
-This guide provides complete documentation for integrating with the AION Credit Protocol deployed on Aptos Mainnet. The protocol enables decentralized credit lines backed by USDC collateral.
+This guide provides complete documentation for integrating with the AION Credit Protocol deployed on Aptos Mainnet. The protocol enables decentralized credit lines backed by USDC collateral that **earns interest**.
 
 ---
 
-## Latest Update (February 2026)
+## Latest Update (February 2026) - v4.0
 
-**Bug Fix:** Credit line reactivation after full collateral withdrawal
+### Major Feature: Collateral Earns Interest
 
-**Problem:** Users who withdrew all collateral had an inactive credit line but couldn't add collateral again (got "credit line exists" error when trying to open, and "not active" when trying to add).
+**What's New:** Borrower collateral is now deposited into the lending pool where it earns interest alongside lender deposits. This means your credit limit **grows automatically** as your collateral earns interest!
 
-**Solution:**
-- `add_collateral` now **reactivates** inactive credit lines automatically
-- New view functions to check credit line existence and status
+**Key Changes:**
+- Collateral is stored in the Lending Pool (not separately)
+- Credit limits are now **dynamic** - they grow as collateral earns interest
+- New view functions for collateral details
+- Interest is distributed proportionally to all depositors (lenders + collateral)
 
-**New Functions Added:**
-- `has_credit_line(manager_addr, borrower)` - Check if credit line exists
-- `get_credit_line_status(manager_addr, borrower)` - Get detailed status
+**New Functions:**
+- `lending_pool::get_collateral_with_interest(pool_addr, borrower)` - Get collateral principal, earned interest, and total
+- `lending_pool::has_collateral(pool_addr, borrower)` - Check if borrower has collateral
+- `lending_pool::get_total_collateral(pool_addr)` - Total collateral in pool
+- `lending_pool::get_all_collateral_depositors(pool_addr)` - List all collateral depositors
+- `credit_manager::get_collateral_details(manager_addr, borrower)` - Get collateral breakdown
+
+**Benefits:**
+- Borrowers earn passive income on collateral
+- Dynamic credit limits that grow over time
+- More capital efficient for the protocol
 
 ---
 
@@ -33,7 +43,7 @@ This guide provides complete documentation for integrating with the AION Credit 
 
 | Component | Address |
 |-----------|---------|
-| **Contract Package** | `0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172` |
+| **Contract Package** | `0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78` |
 | **Admin/Pool Address** | `0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78` |
 | **Circle USDC Token** | `0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b` |
 
@@ -46,9 +56,9 @@ Explorer: https://explorer.aptoslabs.com/?network=mainnet
 
 ### Module Names
 ```
-credit_protocol::lending_pool          - Liquidity management
+credit_protocol::lending_pool          - Liquidity & collateral management
 credit_protocol::credit_manager        - Core credit operations
-credit_protocol::collateral_vault      - Collateral handling
+credit_protocol::collateral_vault      - Legacy collateral handling
 credit_protocol::reputation_manager    - Credit scoring
 credit_protocol::interest_rate_model   - Rate calculations
 ```
@@ -58,32 +68,33 @@ credit_protocol::interest_rate_model   - Rate calculations
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     AION Credit Protocol (Mainnet)                   │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  ┌────────────────┐    ┌────────────────┐    ┌──────────────────┐  │
-│  │  Lending Pool  │◄───│ Credit Manager │───►│ Collateral Vault │  │
-│  │   (Liquidity)  │    │    (Core)      │    │   (Collateral)   │  │
-│  └────────────────┘    └───────┬────────┘    └──────────────────┘  │
-│                                │                                    │
-│         ┌──────────────────────┼──────────────────────┐            │
-│         ▼                      ▼                      ▼            │
-│  ┌────────────────┐    ┌────────────────┐    ┌──────────────────┐  │
-│  │   Reputation   │    │ Interest Rate  │    │   Circle USDC    │  │
-│  │    Manager     │    │     Model      │    │ (Fungible Asset) │  │
-│  └────────────────┘    └────────────────┘    └──────────────────┘  │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------------+
+|                     AION Credit Protocol v2.0 (Mainnet)               |
++-----------------------------------------------------------------------+
+|                                                                       |
+|  +------------------+     +------------------+     +----------------+ |
+|  |   Lending Pool   |<----|  Credit Manager  |---->| Interest Rate  | |
+|  |  +-----------+   |     |      (Core)      |     |     Model      | |
+|  |  | Lender    |   |     +--------+---------+     +----------------+ |
+|  |  | Deposits  |   |              |                                  |
+|  |  +-----------+   |              v                                  |
+|  |  | Collateral|   |     +------------------+     +----------------+ |
+|  |  | Deposits  |   |     |    Reputation    |     |  Circle USDC   | |
+|  |  +-----------+   |     |     Manager      |     | (Fungible Asset)| |
+|  +------------------+     +------------------+     +----------------+ |
+|                                                                       |
+|  * Collateral now stored in Lending Pool and earns interest!         |
++-----------------------------------------------------------------------+
 ```
 
-### Data Flow
-1. **Lenders** deposit USDC → Lending Pool
-2. **Borrowers** deposit collateral → Credit Manager
-3. **Credit line opens** → 1:1 collateral-to-credit ratio
-4. **Borrowing** → Funds from Lending Pool
-5. **Repayment** → Interest distributed to lenders
-6. **Reputation updates** → Credit limit adjustments
+### Data Flow (Updated)
+1. **Lenders** deposit USDC -> Lending Pool
+2. **Borrowers** deposit collateral -> Lending Pool (earns interest!)
+3. **Credit line opens** -> Dynamic credit limit = collateral + earned interest
+4. **Borrowing** -> Funds from Lending Pool
+5. **Repayment** -> Interest distributed to ALL depositors (lenders + collateral)
+6. **Collateral grows** -> Credit limit automatically increases
+7. **Withdraw collateral** -> Get principal + earned interest
 
 ---
 
@@ -107,7 +118,7 @@ credit_protocol::interest_rate_model   - Rate calculations
 
 ### 1. Lending Pool
 
-Manages lender deposits and provides liquidity for borrowers.
+Manages lender deposits, collateral deposits, and provides liquidity for borrowers.
 
 #### Entry Functions
 
@@ -125,9 +136,8 @@ public entry fun deposit(
 **CLI Example:**
 ```bash
 aptos move run \
-  --function-id 0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172::lending_pool::deposit \
+  --function-id 0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78::lending_pool::deposit \
   --args address:0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78 u64:1000000 \
-  --url https://fullnode.mainnet.aptoslabs.com \
   --profile your_profile
 ```
 
@@ -166,18 +176,32 @@ public fun get_total_borrowed(pool_addr: address): u64
 
 #[view]
 public fun is_paused(pool_addr: address): bool
+
+// NEW: Collateral-related view functions
+#[view]
+public fun get_collateral_with_interest(pool_addr: address, borrower: address): (u64, u64, u64)
+// Returns: (principal, earned_interest, total)
+
+#[view]
+public fun has_collateral(pool_addr: address, borrower: address): bool
+
+#[view]
+public fun get_total_collateral(pool_addr: address): u64
+
+#[view]
+public fun get_all_collateral_depositors(pool_addr: address): vector<address>
 ```
 
 ---
 
 ### 2. Credit Manager
 
-Core module for credit lines, borrowing, and repayment.
+Core module for credit lines, borrowing, and repayment. **Collateral now earns interest!**
 
 #### Entry Functions
 
 ##### `open_credit_line`
-Open a new credit line by depositing USDC collateral.
+Open a new credit line by depositing USDC collateral. Collateral is deposited into the lending pool where it earns interest.
 
 ```move
 public entry fun open_credit_line(
@@ -187,7 +211,7 @@ public entry fun open_credit_line(
 )
 ```
 
-**Credit Limit:** 1:1 ratio (e.g., 10 USDC collateral = 10 USDC credit limit)
+**Credit Limit:** Dynamic! Equals your collateral + earned interest.
 
 ##### `add_collateral`
 Add more collateral to increase credit limit. **Also reactivates inactive credit lines.**
@@ -200,10 +224,8 @@ public entry fun add_collateral(
 )
 ```
 
-**Note:** If a user withdrew all collateral (making credit line inactive), calling `add_collateral` will automatically reactivate the credit line.
-
 ##### `borrow`
-Borrow USDC against your credit line.
+Borrow USDC against your credit line. Credit limit is dynamic based on collateral + earned interest.
 
 ```move
 public entry fun borrow(
@@ -238,7 +260,7 @@ public entry fun repay(
 ```
 
 ##### `withdraw_collateral`
-Withdraw collateral (only when no outstanding debt).
+Withdraw collateral plus earned interest (only when no outstanding debt).
 
 ```move
 public entry fun withdraw_collateral(
@@ -248,6 +270,8 @@ public entry fun withdraw_collateral(
 )
 ```
 
+**Note:** When withdrawing all collateral, you receive your principal + any earned interest!
+
 #### View Functions
 
 ```move
@@ -256,7 +280,16 @@ public fun get_credit_info(
     manager_addr: address,
     borrower: address,
 ): (u64, u64, u64, u64, u64, u64, bool)
-// Returns: (collateral, credit_limit, borrowed, interest, total_debt, due_date, is_active)
+// Returns: (initial_collateral, credit_limit, borrowed, interest, total_repaid, due_date, is_active)
+// Note: credit_limit is now DYNAMIC (collateral + earned interest)
+
+#[view]
+public fun get_collateral_details(
+    manager_addr: address,
+    borrower: address,
+): (u64, u64, u64)
+// Returns: (principal, earned_interest, total_collateral)
+// NEW: See exactly how much interest your collateral has earned!
 
 #[view]
 public fun get_repayment_history(
@@ -295,9 +328,19 @@ public fun get_credit_line_status(
 
 #### Frontend Integration Pattern
 
-Use these functions to determine which action to take:
-
 ```typescript
+// Check collateral with earned interest
+const [principal, earnedInterest, totalCollateral] = await aptos.view({
+  payload: {
+    function: `${CONTRACT}::lending_pool::get_collateral_with_interest`,
+    functionArguments: [ADMIN, userAddress],
+  },
+});
+
+console.log(`Principal: ${principal / 1e6} USDC`);
+console.log(`Earned Interest: ${earnedInterest / 1e6} USDC`);
+console.log(`Total (Credit Limit): ${totalCollateral / 1e6} USDC`);
+
 // Check if user has credit line
 const [hasCreditLine] = await aptos.view({
   payload: {
@@ -307,10 +350,10 @@ const [hasCreditLine] = await aptos.view({
 });
 
 if (hasCreditLine) {
-  // Credit line exists → use add_collateral (works even if inactive)
+  // Credit line exists -> use add_collateral (works even if inactive)
   await addCollateral(amount);
 } else {
-  // No credit line → use open_credit_line
+  // No credit line -> use open_credit_line
   await openCreditLine(amount);
 }
 ```
@@ -349,36 +392,7 @@ public fun get_all_users(manager_addr: address): vector<address>
 
 ---
 
-### 4. Collateral Vault
-
-Manages collateral deposits (used internally by Credit Manager).
-
-#### View Functions
-
-```move
-#[view]
-public fun get_collateral_balance(vault_addr: address, user: address): u64
-
-#[view]
-public fun get_user_collateral(
-    vault_addr: address,
-    user: address,
-): (u64, u64, u64, u8)
-// Returns: (total_amount, locked_amount, available_amount, status)
-
-#[view]
-public fun get_total_collateral(vault_addr: address): u64
-
-#[view]
-public fun get_collateralization_ratio(vault_addr: address): u256
-
-#[view]
-public fun get_liquidation_threshold(vault_addr: address): u256
-```
-
----
-
-### 5. Interest Rate Model
+### 4. Interest Rate Model
 
 Calculates interest rates based on utilization.
 
@@ -417,12 +431,11 @@ import {
   Network,
   Account,
   Ed25519PrivateKey,
-  AccountAddress,
 } from "@aptos-labs/ts-sdk";
 
 // ============ CONFIGURATION ============
 
-const CONTRACT = "0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172";
+const CONTRACT = "0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78";
 const ADMIN = "0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78";
 const USDC_DECIMALS = 6;
 
@@ -456,13 +469,8 @@ export class AIONProtocol {
 
   // ============ LENDER FUNCTIONS ============
 
-  /**
-   * Deposit USDC to the lending pool
-   * @param amountUsdc Amount in USDC (e.g., 10 for 10 USDC)
-   */
   async deposit(amountUsdc: number): Promise<string> {
     const amount = this.toRawAmount(amountUsdc);
-
     const tx = await this.aptos.transaction.build.simple({
       sender: this.account.accountAddress,
       data: {
@@ -470,23 +478,16 @@ export class AIONProtocol {
         functionArguments: [ADMIN, amount],
       },
     });
-
     const response = await this.aptos.signAndSubmitTransaction({
       signer: this.account,
       transaction: tx,
     });
-
     await this.aptos.waitForTransaction({ transactionHash: response.hash });
     return response.hash;
   }
 
-  /**
-   * Withdraw USDC from the lending pool
-   * @param amountUsdc Amount in USDC
-   */
   async withdrawFromPool(amountUsdc: number): Promise<string> {
     const amount = this.toRawAmount(amountUsdc);
-
     const tx = await this.aptos.transaction.build.simple({
       sender: this.account.accountAddress,
       data: {
@@ -494,33 +495,26 @@ export class AIONProtocol {
         functionArguments: [ADMIN, amount],
       },
     });
-
     const response = await this.aptos.signAndSubmitTransaction({
       signer: this.account,
       transaction: tx,
     });
-
     await this.aptos.waitForTransaction({ transactionHash: response.hash });
     return response.hash;
   }
 
-  /**
-   * Get lender information
-   */
   async getLenderInfo(address?: string): Promise<{
     deposited: number;
     earnedInterest: number;
     depositTimestamp: Date;
   }> {
     const addr = address || this.getAddress();
-
     const result = await this.aptos.view({
       payload: {
         function: `${CONTRACT}::lending_pool::get_lender_info`,
         functionArguments: [ADMIN, addr],
       },
     });
-
     return {
       deposited: this.fromRawAmount(Number(result[0])),
       earnedInterest: this.fromRawAmount(Number(result[1])),
@@ -530,13 +524,8 @@ export class AIONProtocol {
 
   // ============ BORROWER FUNCTIONS ============
 
-  /**
-   * Open a new credit line with USDC collateral
-   * @param collateralUsdc Collateral amount in USDC (min: 1 USDC)
-   */
   async openCreditLine(collateralUsdc: number): Promise<string> {
     const amount = this.toRawAmount(collateralUsdc);
-
     const tx = await this.aptos.transaction.build.simple({
       sender: this.account.accountAddress,
       data: {
@@ -544,23 +533,16 @@ export class AIONProtocol {
         functionArguments: [ADMIN, amount],
       },
     });
-
     const response = await this.aptos.signAndSubmitTransaction({
       signer: this.account,
       transaction: tx,
     });
-
     await this.aptos.waitForTransaction({ transactionHash: response.hash });
     return response.hash;
   }
 
-  /**
-   * Add collateral to existing credit line
-   * @param amountUsdc Additional collateral in USDC
-   */
   async addCollateral(amountUsdc: number): Promise<string> {
     const amount = this.toRawAmount(amountUsdc);
-
     const tx = await this.aptos.transaction.build.simple({
       sender: this.account.accountAddress,
       data: {
@@ -568,23 +550,16 @@ export class AIONProtocol {
         functionArguments: [ADMIN, amount],
       },
     });
-
     const response = await this.aptos.signAndSubmitTransaction({
       signer: this.account,
       transaction: tx,
     });
-
     await this.aptos.waitForTransaction({ transactionHash: response.hash });
     return response.hash;
   }
 
-  /**
-   * Borrow USDC against credit line
-   * @param amountUsdc Amount to borrow (min: 0.1 USDC)
-   */
   async borrow(amountUsdc: number): Promise<string> {
     const amount = this.toRawAmount(amountUsdc);
-
     const tx = await this.aptos.transaction.build.simple({
       sender: this.account.accountAddress,
       data: {
@@ -592,24 +567,16 @@ export class AIONProtocol {
         functionArguments: [ADMIN, amount],
       },
     });
-
     const response = await this.aptos.signAndSubmitTransaction({
       signer: this.account,
       transaction: tx,
     });
-
     await this.aptos.waitForTransaction({ transactionHash: response.hash });
     return response.hash;
   }
 
-  /**
-   * Borrow and pay directly to a recipient
-   * @param recipientAddress Recipient's address
-   * @param amountUsdc Amount to borrow and send
-   */
   async borrowAndPay(recipientAddress: string, amountUsdc: number): Promise<string> {
     const amount = this.toRawAmount(amountUsdc);
-
     const tx = await this.aptos.transaction.build.simple({
       sender: this.account.accountAddress,
       data: {
@@ -617,25 +584,17 @@ export class AIONProtocol {
         functionArguments: [ADMIN, recipientAddress, amount],
       },
     });
-
     const response = await this.aptos.signAndSubmitTransaction({
       signer: this.account,
       transaction: tx,
     });
-
     await this.aptos.waitForTransaction({ transactionHash: response.hash });
     return response.hash;
   }
 
-  /**
-   * Repay borrowed amount
-   * @param principalUsdc Principal amount to repay
-   * @param interestUsdc Interest amount to repay (optional)
-   */
   async repay(principalUsdc: number, interestUsdc: number = 0): Promise<string> {
     const principal = this.toRawAmount(principalUsdc);
     const interest = this.toRawAmount(interestUsdc);
-
     const tx = await this.aptos.transaction.build.simple({
       sender: this.account.accountAddress,
       data: {
@@ -643,23 +602,16 @@ export class AIONProtocol {
         functionArguments: [ADMIN, principal, interest],
       },
     });
-
     const response = await this.aptos.signAndSubmitTransaction({
       signer: this.account,
       transaction: tx,
     });
-
     await this.aptos.waitForTransaction({ transactionHash: response.hash });
     return response.hash;
   }
 
-  /**
-   * Withdraw collateral (requires no outstanding debt)
-   * @param amountUsdc Amount to withdraw
-   */
   async withdrawCollateral(amountUsdc: number): Promise<string> {
     const amount = this.toRawAmount(amountUsdc);
-
     const tx = await this.aptos.transaction.build.simple({
       sender: this.account.accountAddress,
       data: {
@@ -667,43 +619,78 @@ export class AIONProtocol {
         functionArguments: [ADMIN, amount],
       },
     });
-
     const response = await this.aptos.signAndSubmitTransaction({
       signer: this.account,
       transaction: tx,
     });
-
     await this.aptos.waitForTransaction({ transactionHash: response.hash });
     return response.hash;
   }
 
+  // ============ NEW: COLLATERAL INFO FUNCTIONS ============
+
   /**
-   * Get credit line information
+   * Get collateral details including earned interest
+   * Returns: { principal, earnedInterest, total }
+   */
+  async getCollateralWithInterest(address?: string): Promise<{
+    principal: number;
+    earnedInterest: number;
+    total: number;
+  }> {
+    const addr = address || this.getAddress();
+    const result = await this.aptos.view({
+      payload: {
+        function: `${CONTRACT}::lending_pool::get_collateral_with_interest`,
+        functionArguments: [ADMIN, addr],
+      },
+    });
+    return {
+      principal: this.fromRawAmount(Number(result[0])),
+      earnedInterest: this.fromRawAmount(Number(result[1])),
+      total: this.fromRawAmount(Number(result[2])),
+    };
+  }
+
+  /**
+   * Check if borrower has collateral deposited
+   */
+  async hasCollateral(address?: string): Promise<boolean> {
+    const addr = address || this.getAddress();
+    const result = await this.aptos.view({
+      payload: {
+        function: `${CONTRACT}::lending_pool::has_collateral`,
+        functionArguments: [ADMIN, addr],
+      },
+    });
+    return result[0] as boolean;
+  }
+
+  /**
+   * Get credit line information (credit_limit is now dynamic!)
    */
   async getCreditInfo(address?: string): Promise<{
-    collateral: number;
-    creditLimit: number;
+    initialCollateral: number;
+    creditLimit: number;  // Dynamic: collateral + earned interest
     borrowed: number;
     interest: number;
-    totalDebt: number;
+    totalRepaid: number;
     dueDate: Date;
     isActive: boolean;
   }> {
     const addr = address || this.getAddress();
-
     const result = await this.aptos.view({
       payload: {
         function: `${CONTRACT}::credit_manager::get_credit_info`,
         functionArguments: [ADMIN, addr],
       },
     });
-
     return {
-      collateral: this.fromRawAmount(Number(result[0])),
+      initialCollateral: this.fromRawAmount(Number(result[0])),
       creditLimit: this.fromRawAmount(Number(result[1])),
       borrowed: this.fromRawAmount(Number(result[2])),
       interest: this.fromRawAmount(Number(result[3])),
-      totalDebt: this.fromRawAmount(Number(result[4])),
+      totalRepaid: this.fromRawAmount(Number(result[4])),
       dueDate: new Date(Number(result[5]) * 1000),
       isActive: result[6] as boolean,
     };
@@ -711,19 +698,23 @@ export class AIONProtocol {
 
   // ============ POOL INFO FUNCTIONS ============
 
-  /**
-   * Get lending pool statistics
-   */
   async getPoolInfo(): Promise<{
     totalDeposited: number;
+    totalCollateral: number;
     totalBorrowed: number;
     availableLiquidity: number;
     utilizationRate: number;
   }> {
-    const [deposited, borrowed, liquidity, utilization] = await Promise.all([
+    const [deposited, collateral, borrowed, liquidity, utilization] = await Promise.all([
       this.aptos.view({
         payload: {
           function: `${CONTRACT}::lending_pool::get_total_deposited`,
+          functionArguments: [ADMIN],
+        },
+      }),
+      this.aptos.view({
+        payload: {
+          function: `${CONTRACT}::lending_pool::get_total_collateral`,
           functionArguments: [ADMIN],
         },
       }),
@@ -749,75 +740,26 @@ export class AIONProtocol {
 
     return {
       totalDeposited: this.fromRawAmount(Number(deposited[0])),
+      totalCollateral: this.fromRawAmount(Number(collateral[0])),
       totalBorrowed: this.fromRawAmount(Number(borrowed[0])),
       availableLiquidity: this.fromRawAmount(Number(liquidity[0])),
       utilizationRate: Number(utilization[0]) / 100,
     };
   }
 
-  // ============ REPUTATION FUNCTIONS ============
+  // ============ CREDIT LINE STATUS FUNCTIONS ============
 
-  /**
-   * Get user's reputation score (0-1000)
-   */
-  async getReputationScore(address?: string): Promise<number> {
-    const addr = address || this.getAddress();
-
-    const result = await this.aptos.view({
-      payload: {
-        function: `${CONTRACT}::reputation_manager::get_reputation_score`,
-        functionArguments: [ADMIN, addr],
-      },
-    });
-
-    return Number(result[0]);
-  }
-
-  /**
-   * Check credit increase eligibility
-   */
-  async checkCreditIncreaseEligibility(address?: string): Promise<{
-    eligible: boolean;
-    newLimit: number;
-  }> {
-    const addr = address || this.getAddress();
-
-    const result = await this.aptos.view({
-      payload: {
-        function: `${CONTRACT}::credit_manager::check_credit_increase_eligibility`,
-        functionArguments: [ADMIN, addr],
-      },
-    });
-
-    return {
-      eligible: result[0] as boolean,
-      newLimit: this.fromRawAmount(Number(result[1])),
-    };
-  }
-
-  // ============ CREDIT LINE STATUS FUNCTIONS (v3.1) ============
-
-  /**
-   * Check if a credit line exists for a user (regardless of active status)
-   * Use this to determine whether to call open_credit_line or add_collateral
-   */
   async hasCreditLine(address?: string): Promise<boolean> {
     const addr = address || this.getAddress();
-
     const result = await this.aptos.view({
       payload: {
         function: `${CONTRACT}::credit_manager::has_credit_line`,
         functionArguments: [ADMIN, addr],
       },
     });
-
     return result[0] as boolean;
   }
 
-  /**
-   * Get detailed credit line status
-   * Returns: { exists, isActive, collateral, creditLimit, borrowed }
-   */
   async getCreditLineStatus(address?: string): Promise<{
     exists: boolean;
     isActive: boolean;
@@ -826,14 +768,12 @@ export class AIONProtocol {
     borrowed: number;
   }> {
     const addr = address || this.getAddress();
-
     const result = await this.aptos.view({
       payload: {
         function: `${CONTRACT}::credit_manager::get_credit_line_status`,
         functionArguments: [ADMIN, addr],
       },
     });
-
     return {
       exists: result[0] as boolean,
       isActive: result[1] as boolean,
@@ -843,60 +783,77 @@ export class AIONProtocol {
     };
   }
 
-  /**
-   * Smart function to add collateral - handles both new and existing credit lines
-   * Automatically determines whether to open_credit_line or add_collateral
-   */
   async smartAddCollateral(amountUsdc: number): Promise<string> {
     const hasCreditLine = await this.hasCreditLine();
-
     if (hasCreditLine) {
       return await this.addCollateral(amountUsdc);
     } else {
       return await this.openCreditLine(amountUsdc);
     }
   }
+
+  // ============ REPUTATION FUNCTIONS ============
+
+  async getReputationScore(address?: string): Promise<number> {
+    const addr = address || this.getAddress();
+    const result = await this.aptos.view({
+      payload: {
+        function: `${CONTRACT}::reputation_manager::get_reputation_score`,
+        functionArguments: [ADMIN, addr],
+      },
+    });
+    return Number(result[0]);
+  }
+
+  async checkCreditIncreaseEligibility(address?: string): Promise<{
+    eligible: boolean;
+    newLimit: number;
+  }> {
+    const addr = address || this.getAddress();
+    const result = await this.aptos.view({
+      payload: {
+        function: `${CONTRACT}::credit_manager::check_credit_increase_eligibility`,
+        functionArguments: [ADMIN, addr],
+      },
+    });
+    return {
+      eligible: result[0] as boolean,
+      newLimit: this.fromRawAmount(Number(result[1])),
+    };
+  }
 }
 
 // ============ USAGE EXAMPLE ============
 
 async function main() {
-  // Initialize with your private key (without 0x prefix)
   const protocol = new AIONProtocol("YOUR_PRIVATE_KEY_HERE");
-
   console.log(`Connected as: ${protocol.getAddress()}`);
 
-  // === LENDER FLOW ===
-
-  // Check pool info
+  // Check pool info (now includes collateral)
   const poolInfo = await protocol.getPoolInfo();
   console.log("Pool Info:", poolInfo);
-
-  // Deposit 5 USDC
-  const depositTx = await protocol.deposit(5);
-  console.log(`Deposited: ${depositTx}`);
-
-  // === BORROWER FLOW ===
 
   // Open credit line with 10 USDC collateral
   const openTx = await protocol.openCreditLine(10);
   console.log(`Opened credit line: ${openTx}`);
 
-  // Borrow 5 USDC
+  // Check collateral with earned interest
+  const collateralInfo = await protocol.getCollateralWithInterest();
+  console.log("Collateral Info:", collateralInfo);
+  // { principal: 10, earnedInterest: 0.05, total: 10.05 }
+
+  // Borrow (can borrow up to total collateral!)
   const borrowTx = await protocol.borrow(5);
   console.log(`Borrowed: ${borrowTx}`);
 
-  // Check credit info
+  // Repay
   const creditInfo = await protocol.getCreditInfo();
-  console.log("Credit Info:", creditInfo);
-
-  // Repay the loan
   const repayTx = await protocol.repay(5, creditInfo.interest);
   console.log(`Repaid: ${repayTx}`);
 
-  // Withdraw collateral
-  const withdrawTx = await protocol.withdrawCollateral(10);
-  console.log(`Withdrew collateral: ${withdrawTx}`);
+  // Withdraw collateral (includes earned interest!)
+  const withdrawTx = await protocol.withdrawCollateral(10.05);
+  console.log(`Withdrew collateral + interest: ${withdrawTx}`);
 }
 
 main().catch(console.error);
@@ -910,35 +867,9 @@ main().catch(console.error);
 
 ```bash
 # Set variables
-export CONTRACT="0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172"
+export CONTRACT="0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78"
 export ADMIN="0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78"
 export MAINNET_URL="https://fullnode.mainnet.aptoslabs.com"
-```
-
-### Lender Commands
-
-```bash
-# Deposit 10 USDC (10000000 = 10 * 10^6)
-aptos move run \
-  --function-id ${CONTRACT}::lending_pool::deposit \
-  --args address:${ADMIN} u64:10000000 \
-  --url ${MAINNET_URL} \
-  --profile your_profile \
-  --assume-yes
-
-# Withdraw 5 USDC
-aptos move run \
-  --function-id ${CONTRACT}::lending_pool::withdraw \
-  --args address:${ADMIN} u64:5000000 \
-  --url ${MAINNET_URL} \
-  --profile your_profile \
-  --assume-yes
-
-# Check lender info
-aptos move view \
-  --function-id ${CONTRACT}::lending_pool::get_lender_info \
-  --args address:${ADMIN} address:YOUR_ADDRESS \
-  --url ${MAINNET_URL}
 ```
 
 ### Borrower Commands
@@ -948,69 +879,59 @@ aptos move view \
 aptos move run \
   --function-id ${CONTRACT}::credit_manager::open_credit_line \
   --args address:${ADMIN} u64:5000000 \
-  --url ${MAINNET_URL} \
-  --profile your_profile \
-  --assume-yes
+  --profile your_profile
+
+# Check collateral with earned interest
+aptos move view \
+  --function-id ${CONTRACT}::lending_pool::get_collateral_with_interest \
+  --args address:${ADMIN} address:YOUR_ADDRESS
 
 # Borrow 2 USDC
 aptos move run \
   --function-id ${CONTRACT}::credit_manager::borrow \
   --args address:${ADMIN} u64:2000000 \
-  --url ${MAINNET_URL} \
-  --profile your_profile \
-  --assume-yes
+  --profile your_profile
 
-# Borrow and pay directly to recipient
-aptos move run \
-  --function-id ${CONTRACT}::credit_manager::borrow_and_pay \
-  --args address:${ADMIN} address:RECIPIENT_ADDRESS u64:1000000 \
-  --url ${MAINNET_URL} \
-  --profile your_profile \
-  --assume-yes
-
-# Repay 2 USDC principal, 0 interest
+# Repay 2 USDC principal
 aptos move run \
   --function-id ${CONTRACT}::credit_manager::repay \
   --args address:${ADMIN} u64:2000000 u64:0 \
-  --url ${MAINNET_URL} \
-  --profile your_profile \
-  --assume-yes
+  --profile your_profile
 
-# Withdraw collateral
+# Withdraw collateral (includes earned interest)
 aptos move run \
   --function-id ${CONTRACT}::credit_manager::withdraw_collateral \
   --args address:${ADMIN} u64:5000000 \
-  --url ${MAINNET_URL} \
-  --profile your_profile \
-  --assume-yes
+  --profile your_profile
 
 # Check credit info
 aptos move view \
   --function-id ${CONTRACT}::credit_manager::get_credit_info \
-  --args address:${ADMIN} address:YOUR_ADDRESS \
-  --url ${MAINNET_URL}
+  --args address:${ADMIN} address:YOUR_ADDRESS
+
+# Check collateral details
+aptos move view \
+  --function-id ${CONTRACT}::credit_manager::get_collateral_details \
+  --args address:${ADMIN} address:YOUR_ADDRESS
 ```
 
-### View Commands
+### Pool View Commands
 
 ```bash
 # Pool liquidity
 aptos move view \
   --function-id ${CONTRACT}::lending_pool::get_available_liquidity \
-  --args address:${ADMIN} \
-  --url ${MAINNET_URL}
+  --args address:${ADMIN}
 
-# Reputation score
+# Total collateral in pool
 aptos move view \
-  --function-id ${CONTRACT}::reputation_manager::get_reputation_score \
-  --args address:${ADMIN} address:YOUR_ADDRESS \
-  --url ${MAINNET_URL}
+  --function-id ${CONTRACT}::lending_pool::get_total_collateral \
+  --args address:${ADMIN}
 
-# Credit increase eligibility
+# Check if user has collateral
 aptos move view \
-  --function-id ${CONTRACT}::credit_manager::check_credit_increase_eligibility \
-  --args address:${ADMIN} address:YOUR_ADDRESS \
-  --url ${MAINNET_URL}
+  --function-id ${CONTRACT}::lending_pool::has_collateral \
+  --args address:${ADMIN} address:YOUR_ADDRESS
 ```
 
 ---
@@ -1023,6 +944,7 @@ aptos move view \
 | Minimum Collateral | 1 USDC | Minimum to open credit line |
 | Minimum Borrow | 0.1 USDC | Minimum borrow amount |
 | Collateralization Ratio | 100% | 1:1 collateral to credit limit |
+| Credit Limit | Dynamic | Collateral + earned interest |
 | Fixed Interest Rate | 15% APR | Annual interest on borrowed funds |
 | Protocol Fee | 10% | Fee on interest (to protocol) |
 | Grace Period | 30 days | Time before late penalties |
@@ -1056,83 +978,40 @@ aptos move view \
 | 5 | `E_EXCEEDS_CREDIT_LIMIT` | Borrow exceeds limit |
 | 6 | `E_INSUFFICIENT_LIQUIDITY` | Insufficient pool funds |
 | 7 | `E_EXCEEDS_BORROWED_AMOUNT` | Repay exceeds debt |
-| 8 | `E_EXCEEDS_INTEREST` | Interest exceeds accrued |
-| 9 | `E_LIQUIDATION_NOT_ALLOWED` | Cannot liquidate |
 | 14 | `E_BELOW_MINIMUM_AMOUNT` | Below minimum |
 | 15 | `E_NO_ACTIVE_DEBT` | No debt to repay |
 | 16 | `E_HAS_OUTSTANDING_DEBT` | Cannot withdraw with debt |
 
+### Lending Pool Errors
+
+| Code | Constant | Description |
+|------|----------|-------------|
+| 8 | `E_COLLATERAL_NOT_FOUND` | No collateral deposited |
+
 ---
 
-## Events
+## Tested Transactions (Mainnet v2.0)
 
-### Credit Manager Events
+### v2.0 Deployment & Testing (February 2026)
 
-```move
-#[event]
-struct CreditOpenedEvent {
-    borrower: address,
-    collateral_amount: u64,
-    credit_limit: u64,
-    timestamp: u64,
-}
+**Contract Deployment:** `0xc4a46542e5938edff0bd04465b031f397ee5d3e273cbcef12f60002b20017e72`
 
-#[event]
-struct BorrowedEvent {
-    borrower: address,
-    amount: u64,
-    total_borrowed: u64,
-    due_date: u64,
-    timestamp: u64,
-}
+| Operation | Transaction Hash | Status |
+|-----------|------------------|--------|
+| Deploy Contracts | `0xc4a46542e5938edff0bd04465b031f397ee5d3e273cbcef12f60002b20017e72` | ✅ |
+| Initialize Collateral Vault | `0x1c2f4752ceee11006e4e6c972b7b1002b6890334ef4b07c096458087fd7c7f89` | ✅ |
+| Initialize Reputation Manager | `0x3011915f9f11c2c50f43d8ce35d8a9e717dedc194bd009ff438ea48a9427458d` | ✅ |
+| Initialize Interest Rate Model | `0x699f6a4c0c83602a6d6059e8e208a8ebb80a53ec016fd194317a7450a499ef1f` | ✅ |
+| Initialize Lending Pool | `0x3ccabd5533aa5fbfcd26d43e3944df9fd0899a3bbfb2dc7fe5f0e5c5ea69646b` | ✅ |
+| Initialize Credit Manager | `0x9e301729eedf18d8fd65af8dd758aab3a8ecd80678b7448699d79509a13f5f7c` | ✅ |
+| Open Credit Line (1.5 USDC) | `0xd2e09b481f3dc4869d847750d70e128a3d4be6cbcaf2fea5851607a49448d1c6` | ✅ |
+| Borrow (0.5 USDC) | `0x9a3a5483b58700f3a097294a7d1d8aba16ac6757e39dfb97826ef231756eea6c` | ✅ |
+| Repay (0.5 USDC) | `0xee666007ffb235907b9225531c42cd8ede984aef0397c8065efcd9d3ac1a2042` | ✅ |
+| Withdraw Collateral | `0xbea546644737206d59570ace2d232b6f0f1351f89867a53013c7990cc8a7535e` | ✅ |
 
-#[event]
-struct DirectPaymentEvent {
-    borrower: address,
-    recipient: address,
-    amount: u64,
-    total_borrowed: u64,
-    due_date: u64,
-    timestamp: u64,
-}
+**Test Wallet:** `0x39eafa52cae5498eca230e656f0e7f3cfb627387276360d36e660336f8b905d3`
 
-#[event]
-struct RepaidEvent {
-    borrower: address,
-    principal_amount: u64,
-    interest_amount: u64,
-    remaining_balance: u64,
-    timestamp: u64,
-}
-
-#[event]
-struct CreditLimitIncreasedEvent {
-    borrower: address,
-    old_limit: u64,
-    new_limit: u64,
-    reputation_score: u256,
-    timestamp: u64,
-}
-```
-
-### Lending Pool Events
-
-```move
-#[event]
-struct DepositEvent {
-    lender: address,
-    amount: u64,
-    timestamp: u64,
-}
-
-#[event]
-struct WithdrawEvent {
-    lender: address,
-    amount: u64,
-    interest: u64,
-    timestamp: u64,
-}
-```
+View on Explorer: `https://explorer.aptoslabs.com/txn/{hash}?network=mainnet`
 
 ---
 
@@ -1149,56 +1028,24 @@ struct WithdrawEvent {
 - Pause mechanism for emergencies
 
 ### Collateral Safety
-- Collateral held in protocol-controlled stores
+- Collateral held in lending pool stores
 - Cannot withdraw with outstanding debt
 - Liquidation for unhealthy positions
+- Interest earned increases collateral value
 
 ### Best Practices
 1. Always check pool liquidity before borrowing
 2. Monitor your debt-to-collateral ratio
 3. Repay on time to improve reputation
 4. Keep buffer collateral to avoid liquidation
-
----
-
-## Tested Transactions (Mainnet)
-
-The following transactions verify full functionality on mainnet:
-
-### Initial Tests (January 2026)
-
-| Operation | Transaction Hash | Status |
-|-----------|------------------|--------|
-| Deposit 2 USDC | `0x10a39b2de4a605eb5aaa79ab4883542bd9cb276cbd3570809df198cabb58eb5b` | ✅ |
-| Open Credit Line | `0x89723d6d61795fbad77878229561720cea2876bc4cc5fc796068a5e311a9af62` | ✅ |
-| Borrow 1 USDC | `0xdbd318b155d78de9802da728287278b82741741a74e3f422b50126d6b70520ed` | ✅ |
-| Repay 1 USDC | `0x85e10211bcc470901e706b0681a97291a615ae00b13a16eae93bc24906b5ade6` | ✅ |
-| Withdraw Collateral | `0x38dbbf52bf369004eb62ccf1078da6940285070f427190fd3e25947e19c07b7c` | ✅ |
-| Withdraw from Pool | `0x8001d759bb1e03f65c05b0e719a1e99a20eb70f46413c83f8998ae3ad54f05a0` | ✅ |
-
-### v1.0.1 Update Tests (February 2026)
-
-**Contract Upgrade:** `0xb1cf94d4a7a8f6b2279885524794990394e62ac026339135aa637228847c2906`
-
-| Operation | Transaction Hash | Status |
-|-----------|------------------|--------|
-| Add Collateral (reactivate inactive) | `0x2817c4256f6ae4551e721fcd77711eb0f4d30d8342ec48324db6a443202e19cb` | ✅ |
-| Deposit 2 USDC to Pool | `0xf4ac36b4c71286f95e8a2aee5a6a78a14d01cfda9935b66c77855a6f2effa4fa` | ✅ |
-| Borrow 1 USDC | `0xec2eb901bf6e61f0abb2fe796d10f69b8161c8ebfa3cce34c83d37cdf0739558` | ✅ |
-| Repay 1 USDC | `0x33d45fc25743dcceb442031dd591e9dc92c551f97f55992bc1b76148c1be0cf5` | ✅ |
-| Withdraw All Collateral | `0x1bfe452f73a4cb435da225160ef3dca46461d449a23d68e7f5b51ffaef004840` | ✅ |
-| Add Collateral (reactivate again) | `0xed8d6f55207f9cef73c5aab9ec36456ae1acb37c6b60fec77ff7fbeb651f7a84` | ✅ |
-
-**Test Wallet:** `0x39eafa52cae5498eca230e656f0e7f3cfb627387276360d36e660336f8b905d3`
-
-View on Explorer: `https://explorer.aptoslabs.com/txn/{hash}?network=mainnet`
+5. Check `get_collateral_with_interest` to see your earned interest
 
 ---
 
 ## Support
 
 ### Resources
-- **Explorer:** [Aptos Explorer](https://explorer.aptoslabs.com/account/0x636df8ee3f59dfe7d17ff23d3d072b13c38db48740ac18c27f558e6e26165172?network=mainnet)
+- **Explorer:** [Aptos Explorer](https://explorer.aptoslabs.com/account/0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78?network=mainnet)
 - **Aptos SDK:** [@aptos-labs/ts-sdk](https://www.npmjs.com/package/@aptos-labs/ts-sdk)
 - **Aptos CLI:** [Install Guide](https://aptos.dev/cli-tools/aptos-cli-tool/install-aptos-cli)
 
@@ -1210,11 +1057,20 @@ View on Explorer: `https://explorer.aptoslabs.com/txn/{hash}?network=mainnet`
 
 ## Changelog
 
+### v4.0 / v2.0.0 (February 2026) - Collateral Earns Interest
+- **Major:** Collateral is now deposited into lending pool and earns interest
+- **Major:** Credit limits are now dynamic (collateral + earned interest)
+- **New:** `lending_pool::get_collateral_with_interest` view function
+- **New:** `lending_pool::has_collateral` view function
+- **New:** `lending_pool::get_total_collateral` view function
+- **New:** `lending_pool::get_all_collateral_depositors` view function
+- **New:** `credit_manager::get_collateral_details` view function
+- **New Contract Address:** `0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78`
+
 ### v3.1 (February 2026)
 - **Fix:** `add_collateral` now reactivates inactive credit lines
 - **New:** `has_credit_line` view function
 - **New:** `get_credit_line_status` view function
-- **Upgrade TX:** `0xb1cf94d4a7a8f6b2279885524794990394e62ac026339135aa637228847c2906`
 
 ### v3.0 (January 2026)
 - Initial mainnet deployment
@@ -1224,5 +1080,6 @@ View on Explorer: `https://explorer.aptoslabs.com/txn/{hash}?network=mainnet`
 ---
 
 *Last Updated: February 2026*
-*Version: 3.1 (Mainnet)*
-*Status: Production Ready ✅*
+*Version: 4.0 (Mainnet)*
+*Contract: 0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78*
+*Status: Production Ready*

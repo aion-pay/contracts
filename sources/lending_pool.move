@@ -22,6 +22,7 @@ module credit_protocol::lending_pool {
     const E_PENDING_ADMIN_NOT_SET: u64 = 8;
     const E_NOT_PENDING_ADMIN: u64 = 9;
     const E_BELOW_MINIMUM_AMOUNT: u64 = 10;
+    const E_COLLATERAL_NOT_FOUND: u64 = 11;
 
     /// Constants
     const BASIS_POINTS: u256 = 10000;
@@ -35,17 +36,27 @@ module credit_protocol::lending_pool {
         deposit_timestamp: u64,
     }
 
+    /// Collateral information structure (for borrowers)
+    struct CollateralInfo has copy, store, drop {
+        deposited_amount: u64,
+        earned_interest: u64,
+        deposit_timestamp: u64,
+    }
+
     /// Lending pool resource - uses Fungible Asset standard
     struct LendingPool has key {
         admin: address,
         pending_admin: Option<address>,
         credit_manager: address,
-        total_deposited: u64,
+        total_deposited: u64,           // Total from lenders
+        total_collateral: u64,          // Total from borrowers as collateral
         total_borrowed: u64,
         total_repaid: u64,
         protocol_fees_collected: u64,
         lenders: Table<address, LenderInfo>,
         lenders_list: vector<address>,
+        collateral_deposits: Table<address, CollateralInfo>,  // Collateral from borrowers
+        collateral_list: vector<address>,
         token_metadata: Object<Metadata>,
         token_store: Object<FungibleStore>,
         extend_ref: ExtendRef,  // For withdrawing from the store
@@ -64,6 +75,23 @@ module credit_protocol::lending_pool {
         lender: address,
         amount: u64,
         interest: u64,
+        timestamp: u64,
+    }
+
+    #[event]
+    struct CollateralDepositedEvent has drop, store {
+        borrower: address,
+        amount: u64,
+        total_collateral: u64,
+        timestamp: u64,
+    }
+
+    #[event]
+    struct CollateralWithdrawnEvent has drop, store {
+        borrower: address,
+        amount: u64,
+        interest_earned: u64,
+        remaining_collateral: u64,
         timestamp: u64,
     }
 
@@ -138,11 +166,14 @@ module credit_protocol::lending_pool {
             pending_admin: option::none(),
             credit_manager,
             total_deposited: 0,
+            total_collateral: 0,
             total_borrowed: 0,
             total_repaid: 0,
             protocol_fees_collected: 0,
             lenders: table::new(),
             lenders_list: vector::empty(),
+            collateral_deposits: table::new(),
+            collateral_list: vector::empty(),
             token_metadata,
             token_store,
             extend_ref,
@@ -152,7 +183,7 @@ module credit_protocol::lending_pool {
         move_to(admin, lending_pool);
     }
 
-    /// Deposit funds into the lending pool
+    /// Deposit funds into the lending pool (for lenders)
     public entry fun deposit(
         lender: &signer,
         pool_addr: address,
@@ -193,7 +224,7 @@ module credit_protocol::lending_pool {
         });
     }
 
-    /// Withdraw funds from the lending pool
+    /// Withdraw funds from the lending pool (for lenders)
     public entry fun withdraw(
         lender: &signer,
         pool_addr: address,
@@ -236,6 +267,147 @@ module credit_protocol::lending_pool {
         });
     }
 
+    /// Deposit collateral into the lending pool (called by Credit Manager)
+    /// Collateral also earns interest like lender deposits
+    public fun deposit_collateral(
+        pool_addr: address,
+        borrower: address,
+        amount: u64,
+        from: &signer,
+    ) acquires LendingPool {
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
+
+        assert!(!pool.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
+        assert!(amount > 0, error::invalid_argument(E_INVALID_AMOUNT));
+
+        // Transfer tokens from borrower to pool
+        let fa = dispatchable_fungible_asset::withdraw(from, primary_fungible_store::primary_store(signer::address_of(from), pool.token_metadata), amount);
+        dispatchable_fungible_asset::deposit(pool.token_store, fa);
+
+        // Update or create collateral info
+        if (table::contains(&pool.collateral_deposits, borrower)) {
+            let collateral_info = table::borrow_mut(&mut pool.collateral_deposits, borrower);
+            collateral_info.deposited_amount = collateral_info.deposited_amount + amount;
+            collateral_info.deposit_timestamp = timestamp::now_seconds();
+        } else {
+            let collateral_info = CollateralInfo {
+                deposited_amount: amount,
+                earned_interest: 0,
+                deposit_timestamp: timestamp::now_seconds(),
+            };
+            table::add(&mut pool.collateral_deposits, borrower, collateral_info);
+            vector::push_back(&mut pool.collateral_list, borrower);
+        };
+
+        pool.total_collateral = pool.total_collateral + amount;
+
+        event::emit(CollateralDepositedEvent {
+            borrower,
+            amount,
+            total_collateral: pool.total_collateral,
+            timestamp: timestamp::now_seconds(),
+        });
+    }
+
+    /// Withdraw collateral from the lending pool (called by Credit Manager)
+    /// Returns the amount withdrawn including any earned interest
+    public fun withdraw_collateral(
+        pool_addr: address,
+        borrower: address,
+        amount: u64,
+        include_interest: bool,
+    ): u64 acquires LendingPool {
+        let pool = borrow_global_mut<LendingPool>(pool_addr);
+
+        assert!(table::contains(&pool.collateral_deposits, borrower), error::not_found(E_COLLATERAL_NOT_FOUND));
+
+        // First, calculate values and update collateral_info
+        let (withdraw_amount, principal_withdrawn, interest_withdrawn, should_remove, remaining_collateral) = {
+            let collateral_info = table::borrow_mut(&mut pool.collateral_deposits, borrower);
+
+            // Calculate total available (principal + interest)
+            let total_available = collateral_info.deposited_amount + collateral_info.earned_interest;
+
+            // Determine withdrawal amount
+            let withdraw_amt = if (include_interest && amount >= collateral_info.deposited_amount) {
+                // Withdraw all including interest
+                total_available
+            } else {
+                amount
+            };
+
+            // Calculate how much principal and interest to deduct
+            let interest_part = if (withdraw_amt > collateral_info.deposited_amount) {
+                let ip = withdraw_amt - collateral_info.deposited_amount;
+                collateral_info.earned_interest = collateral_info.earned_interest - ip;
+                ip
+            } else {
+                0
+            };
+
+            let principal_part = withdraw_amt - interest_part;
+            collateral_info.deposited_amount = collateral_info.deposited_amount - principal_part;
+
+            let remaining = collateral_info.deposited_amount;
+            let remove = (collateral_info.deposited_amount == 0 && collateral_info.earned_interest == 0);
+
+            (withdraw_amt, principal_part, interest_part, remove, remaining)
+        };
+
+        // Update pool totals
+        pool.total_collateral = pool.total_collateral - principal_withdrawn;
+
+        // Check available liquidity
+        let pool_balance = fungible_asset::balance(pool.token_store);
+        let available_liquidity = pool_balance - pool.protocol_fees_collected;
+        assert!(available_liquidity >= withdraw_amount, error::invalid_state(E_INSUFFICIENT_LIQUIDITY));
+
+        // Remove borrower from collateral list if fully withdrawn
+        if (should_remove) {
+            remove_collateral_from_list(pool, borrower);
+            table::remove(&mut pool.collateral_deposits, borrower);
+        };
+
+        // Transfer tokens to borrower
+        let pool_signer = object::generate_signer_for_extending(&pool.extend_ref);
+        let fa = dispatchable_fungible_asset::withdraw(&pool_signer, pool.token_store, withdraw_amount);
+        dispatchable_fungible_asset::deposit(primary_fungible_store::ensure_primary_store_exists(borrower, pool.token_metadata), fa);
+
+        event::emit(CollateralWithdrawnEvent {
+            borrower,
+            amount: principal_withdrawn,
+            interest_earned: interest_withdrawn,
+            remaining_collateral,
+            timestamp: timestamp::now_seconds(),
+        });
+
+        withdraw_amount
+    }
+
+    #[view]
+    /// Get collateral info for a borrower (principal + earned interest)
+    public fun get_collateral_with_interest(
+        pool_addr: address,
+        borrower: address,
+    ): (u64, u64, u64) acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
+
+        if (table::contains(&pool.collateral_deposits, borrower)) {
+            let collateral_info = table::borrow(&pool.collateral_deposits, borrower);
+            let total = collateral_info.deposited_amount + collateral_info.earned_interest;
+            (collateral_info.deposited_amount, collateral_info.earned_interest, total)
+        } else {
+            (0, 0, 0)
+        }
+    }
+
+    #[view]
+    /// Check if borrower has collateral deposited
+    public fun has_collateral(pool_addr: address, borrower: address): bool acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
+        table::contains(&pool.collateral_deposits, borrower)
+    }
+
     /// Borrow funds from the lending pool (only by credit manager)
     public entry fun borrow(
         credit_manager: &signer,
@@ -270,7 +442,7 @@ module credit_protocol::lending_pool {
     /// Borrow funds for direct payment to recipient (called internally by credit_manager)
     public fun borrow_for_payment(
         pool_addr: address,
-        borrower: address,
+        recipient: address,
         amount: u64,
     ): u64 acquires LendingPool {
         let pool = borrow_global_mut<LendingPool>(pool_addr);
@@ -282,13 +454,13 @@ module credit_protocol::lending_pool {
 
         pool.total_borrowed = pool.total_borrowed + amount;
 
-        // Transfer tokens to borrower using dispatchable fungible asset
+        // Transfer tokens to recipient using dispatchable fungible asset
         let pool_signer = object::generate_signer_for_extending(&pool.extend_ref);
         let fa = dispatchable_fungible_asset::withdraw(&pool_signer, pool.token_store, amount);
-        dispatchable_fungible_asset::deposit(primary_fungible_store::ensure_primary_store_exists(borrower, pool.token_metadata), fa);
+        dispatchable_fungible_asset::deposit(primary_fungible_store::ensure_primary_store_exists(recipient, pool.token_metadata), fa);
 
         event::emit(BorrowEvent {
-            borrower,
+            borrower: recipient,
             amount,
             timestamp: timestamp::now_seconds(),
         });
@@ -310,14 +482,14 @@ module credit_protocol::lending_pool {
 
         // Calculate protocol fee
         let protocol_fee = ((interest as u256) * PROTOCOL_FEE_RATE / BASIS_POINTS as u64);
-        let lender_interest = interest - protocol_fee;
+        let distributable_interest = interest - protocol_fee;
 
         pool.total_repaid = pool.total_repaid + principal;
         pool.protocol_fees_collected = pool.protocol_fees_collected + protocol_fee;
 
-        // Distribute interest to lenders
-        if (lender_interest > 0 && pool.total_deposited > 0) {
-            distribute_interest(pool, lender_interest);
+        // Distribute interest to lenders AND collateral depositors
+        if (distributable_interest > 0) {
+            distribute_interest_to_all(pool, distributable_interest);
         };
 
         // Receive repayment tokens from caller using dispatchable fungible asset
@@ -348,7 +520,8 @@ module credit_protocol::lending_pool {
     /// Get utilization rate of the pool
     public fun get_utilization_rate(pool_addr: address): u256 acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
-        if (pool.total_deposited == 0) return 0;
+        let total_funds = pool.total_deposited + pool.total_collateral;
+        if (total_funds == 0) return 0;
 
         let current_borrowed = if (pool.total_borrowed > pool.total_repaid) {
             pool.total_borrowed - pool.total_repaid
@@ -356,7 +529,7 @@ module credit_protocol::lending_pool {
             0
         };
 
-        ((current_borrowed as u256) * BASIS_POINTS) / (pool.total_deposited as u256)
+        ((current_borrowed as u256) * BASIS_POINTS) / (total_funds as u256)
     }
 
     #[view]
@@ -434,6 +607,13 @@ module credit_protocol::lending_pool {
     public fun get_all_lenders(pool_addr: address): vector<address> acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
         pool.lenders_list
+    }
+
+    #[view]
+    /// Get all collateral depositors
+    public fun get_all_collateral_depositors(pool_addr: address): vector<address> acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
+        pool.collateral_list
     }
 
     /// Pause the lending pool
@@ -522,22 +702,41 @@ module credit_protocol::lending_pool {
         pool.pending_admin = option::none();
     }
 
-    /// Internal function to distribute interest to lenders
-    fun distribute_interest(pool: &mut LendingPool, interest_amount: u64) {
+    /// Internal function to distribute interest to ALL depositors (lenders + collateral)
+    fun distribute_interest_to_all(pool: &mut LendingPool, interest_amount: u64) {
+        let total_funds = pool.total_deposited + pool.total_collateral;
+        if (total_funds == 0) return;
+
+        // Distribute to lenders
         let i = 0;
         let len = vector::length(&pool.lenders_list);
-
         while (i < len) {
             let lender_addr = *vector::borrow(&pool.lenders_list, i);
             let lender_info = table::borrow_mut(&mut pool.lenders, lender_addr);
 
             if (lender_info.deposited_amount > 0) {
                 let lender_share = ((lender_info.deposited_amount as u256) * (interest_amount as u256))
-                    / (pool.total_deposited as u256);
+                    / (total_funds as u256);
                 lender_info.earned_interest = lender_info.earned_interest + (lender_share as u64);
             };
 
             i = i + 1;
+        };
+
+        // Distribute to collateral depositors
+        let j = 0;
+        let coll_len = vector::length(&pool.collateral_list);
+        while (j < coll_len) {
+            let borrower_addr = *vector::borrow(&pool.collateral_list, j);
+            let collateral_info = table::borrow_mut(&mut pool.collateral_deposits, borrower_addr);
+
+            if (collateral_info.deposited_amount > 0) {
+                let collateral_share = ((collateral_info.deposited_amount as u256) * (interest_amount as u256))
+                    / (total_funds as u256);
+                collateral_info.earned_interest = collateral_info.earned_interest + (collateral_share as u64);
+            };
+
+            j = j + 1;
         };
     }
 
@@ -557,6 +756,22 @@ module credit_protocol::lending_pool {
         };
     }
 
+    /// Internal function to remove collateral depositor from list
+    fun remove_collateral_from_list(pool: &mut LendingPool, borrower: address) {
+        let i = 0;
+        let len = vector::length(&pool.collateral_list);
+        let found = false;
+
+        while (i < len && !found) {
+            if (*vector::borrow(&pool.collateral_list, i) == borrower) {
+                vector::swap_remove(&mut pool.collateral_list, i);
+                found = true;
+            } else {
+                i = i + 1;
+            };
+        };
+    }
+
     #[view]
     /// Get token metadata address
     public fun get_token_metadata(pool_addr: address): Object<Metadata> acquires LendingPool {
@@ -564,11 +779,16 @@ module credit_protocol::lending_pool {
         pool.token_metadata
     }
 
-    /// View functions
     #[view]
     public fun get_total_deposited(pool_addr: address): u64 acquires LendingPool {
         let pool = borrow_global<LendingPool>(pool_addr);
         pool.total_deposited
+    }
+
+    #[view]
+    public fun get_total_collateral(pool_addr: address): u64 acquires LendingPool {
+        let pool = borrow_global<LendingPool>(pool_addr);
+        pool.total_collateral
     }
 
     #[view]

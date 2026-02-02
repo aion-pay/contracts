@@ -6,10 +6,8 @@ module credit_protocol::credit_manager {
     use std::option::{Self, Option};
     use aptos_framework::timestamp;
     use aptos_framework::event;
-    use aptos_framework::object::{Self, Object, ExtendRef};
-    use aptos_framework::fungible_asset::{Self, FungibleStore, Metadata};
-    use aptos_framework::primary_fungible_store;
-    use aptos_framework::dispatchable_fungible_asset;
+    use aptos_framework::object::{Self, Object};
+    use aptos_framework::fungible_asset::Metadata;
     use aptos_framework::table::{Self, Table};
 
     // Import other modules
@@ -46,10 +44,9 @@ module credit_protocol::credit_manager {
     const MAX_INTEREST_RATE: u256 = 5000; // 50% max annual rate
     const MAX_CREDIT_MULTIPLIER: u256 = 20000; // 200% max multiplier
 
-    /// Credit line structure
+    /// Credit line structure - collateral is now in lending pool
     struct CreditLine has copy, store, drop {
-        collateral_deposited: u64,
-        credit_limit: u64,
+        initial_collateral: u64,      // Original collateral deposited (for reference)
         borrowed_amount: u64,
         last_borrowed_timestamp: u64,
         interest_accrued: u64,
@@ -61,7 +58,7 @@ module credit_protocol::credit_manager {
         late_repayments: u64,
     }
 
-    /// Credit manager resource - uses Fungible Asset standard
+    /// Credit manager resource - collateral now stored in lending pool
     struct CreditManager has key {
         admin: address,
         pending_admin: Option<address>,
@@ -75,8 +72,6 @@ module credit_protocol::credit_manager {
         credit_lines: Table<address, CreditLine>,
         borrowers_list: vector<address>,
         token_metadata: Object<Metadata>,
-        token_store: Object<FungibleStore>,
-        extend_ref: ExtendRef,  // For withdrawing from the store
         is_paused: bool,
     }
 
@@ -147,6 +142,7 @@ module credit_protocol::credit_manager {
     struct CollateralWithdrawnEvent has drop, store {
         borrower: address,
         amount: u64,
+        interest_earned: u64,
         remaining_collateral: u64,
         remaining_credit_limit: u64,
         timestamp: u64,
@@ -186,7 +182,7 @@ module credit_protocol::credit_manager {
         timestamp: u64,
     }
 
-    /// Initialize the credit manager with a specific fungible asset
+    /// Initialize the credit manager
     public entry fun initialize(
         admin: &signer,
         lending_pool_addr: address,
@@ -205,11 +201,6 @@ module credit_protocol::credit_manager {
 
         let token_metadata = object::address_to_object<Metadata>(token_metadata_addr);
 
-        // Create a fungible store for holding collateral
-        let constructor_ref = object::create_object(admin_addr);
-        let extend_ref = object::generate_extend_ref(&constructor_ref);
-        let token_store = fungible_asset::create_store(&constructor_ref, token_metadata);
-
         let credit_manager = CreditManager {
             admin: admin_addr,
             pending_admin: option::none(),
@@ -223,15 +214,13 @@ module credit_protocol::credit_manager {
             credit_lines: table::new(),
             borrowers_list: vector::empty(),
             token_metadata,
-            token_store,
-            extend_ref,
             is_paused: false,
         };
 
         move_to(admin, credit_manager);
     }
 
-    /// Open a credit line
+    /// Open a credit line - collateral goes to lending pool
     public entry fun open_credit_line(
         borrower: &signer,
         manager_addr: address,
@@ -248,16 +237,19 @@ module credit_protocol::credit_manager {
             error::already_exists(E_CREDIT_LINE_EXISTS)
         );
 
-        // Transfer collateral from borrower to manager's collateral reserve using dispatchable fungible asset
-        let collateral_fa = dispatchable_fungible_asset::withdraw(borrower, primary_fungible_store::primary_store(signer::address_of(borrower), manager.token_metadata), collateral_amount);
-        dispatchable_fungible_asset::deposit(manager.token_store, collateral_fa);
+        // Deposit collateral to lending pool (it will earn interest there!)
+        lending_pool::deposit_collateral(
+            manager.lending_pool_addr,
+            borrower_addr,
+            collateral_amount,
+            borrower
+        );
 
-        // Calculate credit limit (1:1 ratio)
+        // Credit limit = collateral amount (1:1 ratio) - will grow with interest
         let credit_limit = collateral_amount;
 
         let credit_line = CreditLine {
-            collateral_deposited: collateral_amount,
-            credit_limit,
+            initial_collateral: collateral_amount,
             borrowed_amount: 0,
             last_borrowed_timestamp: 0,
             interest_accrued: 0,
@@ -296,16 +288,24 @@ module credit_protocol::credit_manager {
             error::not_found(E_CREDIT_LINE_NOT_ACTIVE)
         );
 
+        // Deposit additional collateral to lending pool
+        lending_pool::deposit_collateral(
+            manager.lending_pool_addr,
+            borrower_addr,
+            collateral_amount,
+            borrower
+        );
+
+        // Get updated collateral with interest from lending pool
+        let (_, _, total_collateral) = lending_pool::get_collateral_with_interest(
+            manager.lending_pool_addr,
+            borrower_addr
+        );
+
         let credit_line = table::borrow_mut(&mut manager.credit_lines, borrower_addr);
-        // Removed is_active check - allow adding collateral to reactivate inactive credit lines
 
-        // Transfer additional collateral using dispatchable fungible asset
-        let collateral_fa = dispatchable_fungible_asset::withdraw(borrower, primary_fungible_store::primary_store(signer::address_of(borrower), manager.token_metadata), collateral_amount);
-        dispatchable_fungible_asset::deposit(manager.token_store, collateral_fa);
-
-        // Update credit line
-        credit_line.collateral_deposited = credit_line.collateral_deposited + collateral_amount;
-        credit_line.credit_limit = credit_line.credit_limit + collateral_amount;
+        // Update initial collateral tracking
+        credit_line.initial_collateral = credit_line.initial_collateral + collateral_amount;
 
         // Reactivate the credit line if it was inactive
         if (!credit_line.is_active) {
@@ -315,13 +315,13 @@ module credit_protocol::credit_manager {
         event::emit(CollateralAddedEvent {
             borrower: borrower_addr,
             amount: collateral_amount,
-            total_collateral: credit_line.collateral_deposited,
-            new_credit_limit: credit_line.credit_limit,
+            total_collateral,
+            new_credit_limit: total_collateral, // Credit limit = total collateral with interest
             timestamp: timestamp::now_seconds(),
         });
     }
 
-    /// Borrow funds
+    /// Borrow funds - credit limit is dynamic based on collateral + earned interest
     public entry fun borrow(
         borrower: &signer,
         manager_addr: address,
@@ -344,9 +344,15 @@ module credit_protocol::credit_manager {
         let credit_line = table::borrow_mut(&mut manager.credit_lines, borrower_addr);
         assert!(credit_line.is_active, error::invalid_state(E_CREDIT_LINE_NOT_ACTIVE));
 
+        // Get dynamic credit limit from lending pool (collateral + earned interest)
+        let (_, _, credit_limit) = lending_pool::get_collateral_with_interest(
+            manager.lending_pool_addr,
+            borrower_addr
+        );
+
         let total_debt = credit_line.borrowed_amount + credit_line.interest_accrued;
         assert!(
-            total_debt + amount <= credit_line.credit_limit,
+            total_debt + amount <= credit_limit,
             error::invalid_state(E_EXCEEDS_CREDIT_LIMIT)
         );
 
@@ -401,9 +407,15 @@ module credit_protocol::credit_manager {
         let credit_line = table::borrow_mut(&mut manager.credit_lines, borrower_addr);
         assert!(credit_line.is_active, error::invalid_state(E_CREDIT_LINE_NOT_ACTIVE));
 
+        // Get dynamic credit limit from lending pool (collateral + earned interest)
+        let (_, _, credit_limit) = lending_pool::get_collateral_with_interest(
+            manager.lending_pool_addr,
+            borrower_addr
+        );
+
         let total_debt = credit_line.borrowed_amount + credit_line.interest_accrued;
         assert!(
-            total_debt + amount <= credit_line.credit_limit,
+            total_debt + amount <= credit_limit,
             error::invalid_state(E_EXCEEDS_CREDIT_LIMIT)
         );
 
@@ -503,11 +515,6 @@ module credit_protocol::credit_manager {
             principal_amount + interest_amount
         );
 
-        // Check for credit limit increase only if debt is fully repaid
-        if (remaining_balance == 0) {
-            check_credit_limit_increase_internal(manager, borrower_addr);
-        };
-
         event::emit(RepaidEvent {
             borrower: borrower_addr,
             principal_amount,
@@ -538,24 +545,44 @@ module credit_protocol::credit_manager {
         let credit_line = table::borrow_mut(&mut manager.credit_lines, borrower);
         assert!(credit_line.is_active, error::invalid_state(E_CREDIT_LINE_NOT_ACTIVE));
 
-        let is_over_ltv = is_over_ltv_internal(credit_line);
+        // Get current collateral value from lending pool
+        let (_principal, _interest, total_collateral) = lending_pool::get_collateral_with_interest(
+            manager.lending_pool_addr,
+            borrower
+        );
+
+        let is_over_ltv = is_over_ltv_internal(credit_line, total_collateral);
         let is_overdue = is_overdue_internal(credit_line);
 
         assert!(is_over_ltv || is_overdue, error::invalid_state(E_LIQUIDATION_NOT_ALLOWED));
 
         let total_debt = credit_line.borrowed_amount + credit_line.interest_accrued;
-        let collateral_to_liquidate = if (total_debt < credit_line.collateral_deposited) {
+        let collateral_to_liquidate = if (total_debt < total_collateral) {
             total_debt
         } else {
-            credit_line.collateral_deposited
+            total_collateral
         };
+
+        // Withdraw collateral from lending pool to cover debt
+        let _withdrawn = lending_pool::withdraw_collateral(
+            manager.lending_pool_addr,
+            borrower,
+            collateral_to_liquidate,
+            false // Don't include interest bonus for liquidation
+        );
 
         // Update credit line
         credit_line.borrowed_amount = 0;
         credit_line.interest_accrued = 0;
-        credit_line.collateral_deposited = credit_line.collateral_deposited - collateral_to_liquidate;
+        credit_line.initial_collateral = 0;
 
-        if (credit_line.collateral_deposited == 0) {
+        // Check if any collateral remains
+        let (remaining_principal, _, _) = lending_pool::get_collateral_with_interest(
+            manager.lending_pool_addr,
+            borrower
+        );
+
+        if (remaining_principal == 0) {
             credit_line.is_active = false;
         };
 
@@ -575,7 +602,7 @@ module credit_protocol::credit_manager {
     }
 
     #[view]
-    /// Get credit information for a borrower
+    /// Get credit information for a borrower - credit limit is dynamic!
     public fun get_credit_info(
         manager_addr: address,
         borrower: address,
@@ -587,9 +614,15 @@ module credit_protocol::credit_manager {
             let current_interest = calculate_interest_internal(manager, borrower);
             let total_interest = credit_line.interest_accrued + current_interest;
 
+            // Get dynamic credit limit from lending pool (collateral + earned interest)
+            let (_, _, credit_limit) = lending_pool::get_collateral_with_interest(
+                manager.lending_pool_addr,
+                borrower
+            );
+
             (
-                credit_line.collateral_deposited,
-                credit_line.credit_limit,
+                credit_limit, // This is now dynamic (collateral + earned interest)
+                credit_limit, // Credit limit = collateral value
                 credit_line.borrowed_amount,
                 total_interest,
                 credit_line.borrowed_amount + total_interest,
@@ -599,6 +632,16 @@ module credit_protocol::credit_manager {
         } else {
             (0, 0, 0, 0, 0, 0, false)
         }
+    }
+
+    #[view]
+    /// Get detailed collateral info (principal, interest earned, total)
+    public fun get_collateral_details(
+        manager_addr: address,
+        borrower: address,
+    ): (u64, u64, u64) acquires CreditManager {
+        let manager = borrow_global<CreditManager>(manager_addr);
+        lending_pool::get_collateral_with_interest(manager.lending_pool_addr, borrower)
     }
 
     #[view]
@@ -643,9 +686,15 @@ module credit_protocol::credit_manager {
         let has_repayment_history = credit_line.on_time_repayments > 0;
         let no_current_debt = credit_line.borrowed_amount == 0;
 
+        // Get current credit limit from lending pool
+        let (_, _, current_limit) = lending_pool::get_collateral_with_interest(
+            manager.lending_pool_addr,
+            borrower
+        );
+
         let eligible = has_good_reputation && has_repayment_history && no_current_debt;
         let new_limit = if (eligible) {
-            ((credit_line.credit_limit as u256) * manager.credit_increase_multiplier / BASIS_POINTS as u64)
+            ((current_limit as u256) * manager.credit_increase_multiplier / BASIS_POINTS as u64)
         } else {
             0
         };
@@ -660,7 +709,7 @@ module credit_protocol::credit_manager {
         manager.borrowers_list
     }
 
-    /// Withdraw excess collateral (when no outstanding debt)
+    /// Withdraw collateral - includes earned interest!
     public entry fun withdraw_collateral(
         borrower: &signer,
         manager_addr: address,
@@ -685,30 +734,49 @@ module credit_protocol::credit_manager {
         // Can only withdraw if no outstanding debt
         let total_debt = credit_line.borrowed_amount + credit_line.interest_accrued;
         assert!(total_debt == 0, error::invalid_state(E_HAS_OUTSTANDING_DEBT));
+
+        // Get current collateral + interest from lending pool
+        let (principal, _earned_interest, total_available) = lending_pool::get_collateral_with_interest(
+            manager.lending_pool_addr,
+            borrower_addr
+        );
+
         assert!(
-            amount <= credit_line.collateral_deposited,
+            amount <= total_available,
             error::invalid_argument(E_INVALID_AMOUNT)
         );
 
-        // Update credit line
-        credit_line.collateral_deposited = credit_line.collateral_deposited - amount;
-        credit_line.credit_limit = credit_line.collateral_deposited;
+        // Withdraw from lending pool (includes interest if withdrawing all)
+        let include_interest = amount >= principal;
+        let withdrawn = lending_pool::withdraw_collateral(
+            manager.lending_pool_addr,
+            borrower_addr,
+            amount,
+            include_interest
+        );
 
-        // Transfer collateral back to borrower using dispatchable fungible asset
-        let manager_signer = object::generate_signer_for_extending(&manager.extend_ref);
-        let withdrawal_fa = dispatchable_fungible_asset::withdraw(&manager_signer, manager.token_store, amount);
-        dispatchable_fungible_asset::deposit(primary_fungible_store::ensure_primary_store_exists(borrower_addr, manager.token_metadata), withdrawal_fa);
+        // Get remaining collateral after withdrawal
+        let (remaining_principal, _remaining_interest, remaining_total) = lending_pool::get_collateral_with_interest(
+            manager.lending_pool_addr,
+            borrower_addr
+        );
+
+        // Update credit line tracking
+        credit_line.initial_collateral = remaining_principal;
 
         // Deactivate credit line if all collateral is withdrawn
-        if (credit_line.collateral_deposited == 0) {
+        if (remaining_total == 0) {
             credit_line.is_active = false;
         };
+
+        let interest_withdrawn = if (withdrawn > amount) { withdrawn - amount } else { 0 };
 
         event::emit(CollateralWithdrawnEvent {
             borrower: borrower_addr,
             amount,
-            remaining_collateral: credit_line.collateral_deposited,
-            remaining_credit_limit: credit_line.credit_limit,
+            interest_earned: interest_withdrawn,
+            remaining_collateral: remaining_total,
+            remaining_credit_limit: remaining_total,
             timestamp: timestamp::now_seconds(),
         });
     }
@@ -867,56 +935,17 @@ module credit_protocol::credit_manager {
     }
 
     /// Internal function to check if over LTV
-    fun is_over_ltv_internal(credit_line: &CreditLine): bool {
-        if (credit_line.collateral_deposited == 0) return true;
+    fun is_over_ltv_internal(credit_line: &CreditLine, collateral_value: u64): bool {
+        if (collateral_value == 0) return true;
 
         let total_debt = credit_line.borrowed_amount + credit_line.interest_accrued;
-        let current_ltv = ((total_debt as u256) * BASIS_POINTS) / (credit_line.collateral_deposited as u256);
+        let current_ltv = ((total_debt as u256) * BASIS_POINTS) / (collateral_value as u256);
         current_ltv > LIQUIDATION_THRESHOLD
     }
 
     /// Internal function to check if overdue
     fun is_overdue_internal(credit_line: &CreditLine): bool {
         credit_line.borrowed_amount > 0 && timestamp::now_seconds() > credit_line.repayment_due_date
-    }
-
-    /// Internal function to check credit limit increase
-    fun check_credit_limit_increase_internal(manager: &mut CreditManager, borrower: address) {
-        if (!table::contains(&manager.credit_lines, borrower)) {
-            return
-        };
-
-        let credit_line = table::borrow(&manager.credit_lines, borrower);
-        if (!credit_line.is_active) {
-            return
-        };
-
-        let reputation_score = reputation_manager::get_reputation_score(
-            manager.reputation_manager_addr,
-            borrower
-        );
-
-        let has_good_reputation = reputation_score >= manager.reputation_threshold;
-        let has_repayment_history = credit_line.on_time_repayments > 0;
-        let no_current_debt = credit_line.borrowed_amount == 0;
-
-        let eligible = has_good_reputation && has_repayment_history && no_current_debt;
-
-        if (eligible) {
-            let new_limit = ((credit_line.credit_limit as u256) * manager.credit_increase_multiplier / BASIS_POINTS as u64);
-
-            let credit_line_mut = table::borrow_mut(&mut manager.credit_lines, borrower);
-            let old_limit = credit_line_mut.credit_limit;
-            credit_line_mut.credit_limit = new_limit;
-
-            event::emit(CreditLimitIncreasedEvent {
-                borrower,
-                old_limit,
-                new_limit,
-                reputation_score,
-                timestamp: timestamp::now_seconds(),
-            });
-        };
     }
 
     /// View functions
@@ -963,7 +992,7 @@ module credit_protocol::credit_manager {
 
     #[view]
     /// Get detailed credit line status
-    /// Returns: (exists, is_active, collateral_deposited, credit_limit, borrowed_amount)
+    /// Returns: (exists, is_active, collateral_with_interest, credit_limit, borrowed_amount)
     public fun get_credit_line_status(
         manager_addr: address,
         borrower: address,
@@ -972,7 +1001,14 @@ module credit_protocol::credit_manager {
 
         if (table::contains(&manager.credit_lines, borrower)) {
             let credit_line = table::borrow(&manager.credit_lines, borrower);
-            (true, credit_line.is_active, credit_line.collateral_deposited, credit_line.credit_limit, credit_line.borrowed_amount)
+
+            // Get collateral with interest from lending pool
+            let (_, _, total_collateral) = lending_pool::get_collateral_with_interest(
+                manager.lending_pool_addr,
+                borrower
+            );
+
+            (true, credit_line.is_active, total_collateral, total_collateral, credit_line.borrowed_amount)
         } else {
             (false, false, 0, 0, 0)
         }

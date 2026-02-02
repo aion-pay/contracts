@@ -1,14 +1,31 @@
-# AION Credit Protocol - Mainnet Integration Guide v3.0
+# AION Credit Protocol - Mainnet Integration Guide v3.1
 
 ## Overview
 
 **Status:** ✅ **LIVE ON APTOS MAINNET**
 **Network:** Aptos Mainnet
 **Token:** Circle USDC (Native Fungible Asset)
-**Last Updated:** January 2026
+**Last Updated:** February 2026
+**Contract Version:** v1.0.1 (Upgrade: `0xb1cf94d4a7a8f6b2279885524794990394e62ac026339135aa637228847c2906`)
 **Testing Status:** All functions verified with real USDC ✅
 
 This guide provides complete documentation for integrating with the AION Credit Protocol deployed on Aptos Mainnet. The protocol enables decentralized credit lines backed by USDC collateral.
+
+---
+
+## Latest Update (February 2026)
+
+**Bug Fix:** Credit line reactivation after full collateral withdrawal
+
+**Problem:** Users who withdrew all collateral had an inactive credit line but couldn't add collateral again (got "credit line exists" error when trying to open, and "not active" when trying to add).
+
+**Solution:**
+- `add_collateral` now **reactivates** inactive credit lines automatically
+- New view functions to check credit line existence and status
+
+**New Functions Added:**
+- `has_credit_line(manager_addr, borrower)` - Check if credit line exists
+- `get_credit_line_status(manager_addr, borrower)` - Get detailed status
 
 ---
 
@@ -173,7 +190,7 @@ public entry fun open_credit_line(
 **Credit Limit:** 1:1 ratio (e.g., 10 USDC collateral = 10 USDC credit limit)
 
 ##### `add_collateral`
-Add more collateral to increase credit limit.
+Add more collateral to increase credit limit. **Also reactivates inactive credit lines.**
 
 ```move
 public entry fun add_collateral(
@@ -182,6 +199,8 @@ public entry fun add_collateral(
     collateral_amount: u64,
 )
 ```
+
+**Note:** If a user withdrew all collateral (making credit line inactive), calling `add_collateral` will automatically reactivate the credit line.
 
 ##### `borrow`
 Borrow USDC against your credit line.
@@ -261,6 +280,39 @@ public fun get_fixed_interest_rate(manager_addr: address): u256
 
 #[view]
 public fun is_paused(manager_addr: address): bool
+
+#[view]
+public fun has_credit_line(manager_addr: address, borrower: address): bool
+// Returns true if credit line exists (regardless of active status)
+
+#[view]
+public fun get_credit_line_status(
+    manager_addr: address,
+    borrower: address,
+): (bool, bool, u64, u64, u64)
+// Returns: (exists, is_active, collateral_deposited, credit_limit, borrowed_amount)
+```
+
+#### Frontend Integration Pattern
+
+Use these functions to determine which action to take:
+
+```typescript
+// Check if user has credit line
+const [hasCreditLine] = await aptos.view({
+  payload: {
+    function: `${CONTRACT}::credit_manager::has_credit_line`,
+    functionArguments: [ADMIN, userAddress],
+  },
+});
+
+if (hasCreditLine) {
+  // Credit line exists → use add_collateral (works even if inactive)
+  await addCollateral(amount);
+} else {
+  // No credit line → use open_credit_line
+  await openCreditLine(amount);
+}
 ```
 
 ---
@@ -742,6 +794,68 @@ export class AIONProtocol {
       newLimit: this.fromRawAmount(Number(result[1])),
     };
   }
+
+  // ============ CREDIT LINE STATUS FUNCTIONS (v3.1) ============
+
+  /**
+   * Check if a credit line exists for a user (regardless of active status)
+   * Use this to determine whether to call open_credit_line or add_collateral
+   */
+  async hasCreditLine(address?: string): Promise<boolean> {
+    const addr = address || this.getAddress();
+
+    const result = await this.aptos.view({
+      payload: {
+        function: `${CONTRACT}::credit_manager::has_credit_line`,
+        functionArguments: [ADMIN, addr],
+      },
+    });
+
+    return result[0] as boolean;
+  }
+
+  /**
+   * Get detailed credit line status
+   * Returns: { exists, isActive, collateral, creditLimit, borrowed }
+   */
+  async getCreditLineStatus(address?: string): Promise<{
+    exists: boolean;
+    isActive: boolean;
+    collateral: number;
+    creditLimit: number;
+    borrowed: number;
+  }> {
+    const addr = address || this.getAddress();
+
+    const result = await this.aptos.view({
+      payload: {
+        function: `${CONTRACT}::credit_manager::get_credit_line_status`,
+        functionArguments: [ADMIN, addr],
+      },
+    });
+
+    return {
+      exists: result[0] as boolean,
+      isActive: result[1] as boolean,
+      collateral: this.fromRawAmount(Number(result[2])),
+      creditLimit: this.fromRawAmount(Number(result[3])),
+      borrowed: this.fromRawAmount(Number(result[4])),
+    };
+  }
+
+  /**
+   * Smart function to add collateral - handles both new and existing credit lines
+   * Automatically determines whether to open_credit_line or add_collateral
+   */
+  async smartAddCollateral(amountUsdc: number): Promise<string> {
+    const hasCreditLine = await this.hasCreditLine();
+
+    if (hasCreditLine) {
+      return await this.addCollateral(amountUsdc);
+    } else {
+      return await this.openCreditLine(amountUsdc);
+    }
+  }
 }
 
 // ============ USAGE EXAMPLE ============
@@ -1051,6 +1165,8 @@ struct WithdrawEvent {
 
 The following transactions verify full functionality on mainnet:
 
+### Initial Tests (January 2026)
+
 | Operation | Transaction Hash | Status |
 |-----------|------------------|--------|
 | Deposit 2 USDC | `0x10a39b2de4a605eb5aaa79ab4883542bd9cb276cbd3570809df198cabb58eb5b` | ✅ |
@@ -1059,6 +1175,21 @@ The following transactions verify full functionality on mainnet:
 | Repay 1 USDC | `0x85e10211bcc470901e706b0681a97291a615ae00b13a16eae93bc24906b5ade6` | ✅ |
 | Withdraw Collateral | `0x38dbbf52bf369004eb62ccf1078da6940285070f427190fd3e25947e19c07b7c` | ✅ |
 | Withdraw from Pool | `0x8001d759bb1e03f65c05b0e719a1e99a20eb70f46413c83f8998ae3ad54f05a0` | ✅ |
+
+### v1.0.1 Update Tests (February 2026)
+
+**Contract Upgrade:** `0xb1cf94d4a7a8f6b2279885524794990394e62ac026339135aa637228847c2906`
+
+| Operation | Transaction Hash | Status |
+|-----------|------------------|--------|
+| Add Collateral (reactivate inactive) | `0x2817c4256f6ae4551e721fcd77711eb0f4d30d8342ec48324db6a443202e19cb` | ✅ |
+| Deposit 2 USDC to Pool | `0xf4ac36b4c71286f95e8a2aee5a6a78a14d01cfda9935b66c77855a6f2effa4fa` | ✅ |
+| Borrow 1 USDC | `0xec2eb901bf6e61f0abb2fe796d10f69b8161c8ebfa3cce34c83d37cdf0739558` | ✅ |
+| Repay 1 USDC | `0x33d45fc25743dcceb442031dd591e9dc92c551f97f55992bc1b76148c1be0cf5` | ✅ |
+| Withdraw All Collateral | `0x1bfe452f73a4cb435da225160ef3dca46461d449a23d68e7f5b51ffaef004840` | ✅ |
+| Add Collateral (reactivate again) | `0xed8d6f55207f9cef73c5aab9ec36456ae1acb37c6b60fec77ff7fbeb651f7a84` | ✅ |
+
+**Test Wallet:** `0x39eafa52cae5498eca230e656f0e7f3cfb627387276360d36e660336f8b905d3`
 
 View on Explorer: `https://explorer.aptoslabs.com/txn/{hash}?network=mainnet`
 
@@ -1077,6 +1208,21 @@ View on Explorer: `https://explorer.aptoslabs.com/txn/{hash}?network=mainnet`
 
 ---
 
-*Last Updated: January 2026*
-*Version: 3.0 (Mainnet)*
+## Changelog
+
+### v3.1 (February 2026)
+- **Fix:** `add_collateral` now reactivates inactive credit lines
+- **New:** `has_credit_line` view function
+- **New:** `get_credit_line_status` view function
+- **Upgrade TX:** `0xb1cf94d4a7a8f6b2279885524794990394e62ac026339135aa637228847c2906`
+
+### v3.0 (January 2026)
+- Initial mainnet deployment
+- Full Fungible Asset support for Circle USDC
+- Core modules: Lending Pool, Credit Manager, Collateral Vault, Reputation Manager, Interest Rate Model
+
+---
+
+*Last Updated: February 2026*
+*Version: 3.1 (Mainnet)*
 *Status: Production Ready ✅*

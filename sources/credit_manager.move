@@ -280,7 +280,7 @@ module credit_protocol::credit_manager {
         });
     }
 
-    /// Add collateral to existing credit line
+    /// Add collateral to existing credit line (also reactivates inactive credit lines)
     public entry fun add_collateral(
         borrower: &signer,
         manager_addr: address,
@@ -297,7 +297,7 @@ module credit_protocol::credit_manager {
         );
 
         let credit_line = table::borrow_mut(&mut manager.credit_lines, borrower_addr);
-        assert!(credit_line.is_active, error::invalid_state(E_CREDIT_LINE_NOT_ACTIVE));
+        // Removed is_active check - allow adding collateral to reactivate inactive credit lines
 
         // Transfer additional collateral using dispatchable fungible asset
         let collateral_fa = dispatchable_fungible_asset::withdraw(borrower, primary_fungible_store::primary_store(signer::address_of(borrower), manager.token_metadata), collateral_amount);
@@ -306,6 +306,11 @@ module credit_protocol::credit_manager {
         // Update credit line
         credit_line.collateral_deposited = credit_line.collateral_deposited + collateral_amount;
         credit_line.credit_limit = credit_line.credit_limit + collateral_amount;
+
+        // Reactivate the credit line if it was inactive
+        if (!credit_line.is_active) {
+            credit_line.is_active = true;
+        };
 
         event::emit(CollateralAddedEvent {
             borrower: borrower_addr,
@@ -943,5 +948,33 @@ module credit_protocol::credit_manager {
     public fun get_token_metadata(manager_addr: address): Object<Metadata> acquires CreditManager {
         let manager = borrow_global<CreditManager>(manager_addr);
         manager.token_metadata
+    }
+
+    #[view]
+    /// Check if a credit line exists for a borrower (regardless of active status)
+    /// Use this to determine whether to call open_credit_line or add_collateral
+    public fun has_credit_line(
+        manager_addr: address,
+        borrower: address,
+    ): bool acquires CreditManager {
+        let manager = borrow_global<CreditManager>(manager_addr);
+        table::contains(&manager.credit_lines, borrower)
+    }
+
+    #[view]
+    /// Get detailed credit line status
+    /// Returns: (exists, is_active, collateral_deposited, credit_limit, borrowed_amount)
+    public fun get_credit_line_status(
+        manager_addr: address,
+        borrower: address,
+    ): (bool, bool, u64, u64, u64) acquires CreditManager {
+        let manager = borrow_global<CreditManager>(manager_addr);
+
+        if (table::contains(&manager.credit_lines, borrower)) {
+            let credit_line = table::borrow(&manager.credit_lines, borrower);
+            (true, credit_line.is_active, credit_line.collateral_deposited, credit_line.credit_limit, credit_line.borrowed_amount)
+        } else {
+            (false, false, 0, 0, 0)
+        }
     }
 }

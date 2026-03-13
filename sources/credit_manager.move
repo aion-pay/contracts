@@ -32,17 +32,20 @@ module credit_protocol::credit_manager {
     const E_NO_ACTIVE_DEBT: u64 = 15;
     const E_HAS_OUTSTANDING_DEBT: u64 = 16;
     const E_INVALID_PARAMETERS: u64 = 17;
+    const E_OVERFLOW: u64 = 18;
 
     /// Constants
     const BASIS_POINTS: u256 = 10000;
     const SECONDS_PER_YEAR: u64 = 31536000; // 365 * 24 * 60 * 60
     const GRACE_PERIOD: u64 = 2592000; // 30 days
-    const MAX_LTV: u256 = 10000; // 100%
+    // L-01: Removed unused MAX_LTV constant
     const LIQUIDATION_THRESHOLD: u256 = 11000; // 110%
     const MIN_COLLATERAL_AMOUNT: u64 = 1000000; // Minimum 1 USDC (6 decimals)
     const MIN_BORROW_AMOUNT: u64 = 100000; // Minimum 0.1 USDC
     const MAX_INTEREST_RATE: u256 = 5000; // 50% max annual rate
+    const MIN_INTEREST_RATE: u256 = 100; // 1% minimum annual rate
     const MAX_CREDIT_MULTIPLIER: u256 = 20000; // 200% max multiplier
+    const MAX_U64: u256 = 18446744073709551615;
 
     /// Credit line structure - collateral is now in lending pool
     struct CreditLine has copy, store, drop {
@@ -58,14 +61,12 @@ module credit_protocol::credit_manager {
         late_repayments: u64,
     }
 
-    /// Credit manager resource - collateral now stored in lending pool
+    /// Credit manager resource - collateral stored in lending pool
     struct CreditManager has key {
         admin: address,
         pending_admin: Option<address>,
         lending_pool_addr: address,
-        collateral_vault_addr: address,
         reputation_manager_addr: address,
-        interest_rate_model_addr: address,
         fixed_interest_rate: u256,
         reputation_threshold: u256,
         credit_increase_multiplier: u256,
@@ -174,6 +175,14 @@ module credit_protocol::credit_manager {
         timestamp: u64,
     }
 
+    // H-06: New event struct for admin transfer cancellation
+    #[event]
+    struct AdminTransferCancelledEvent has drop, store {
+        admin: address,
+        cancelled_pending_admin: address,
+        timestamp: u64,
+    }
+
     #[event]
     struct ParametersUpdatedEvent has drop, store {
         fixed_interest_rate: u256,
@@ -182,22 +191,31 @@ module credit_protocol::credit_manager {
         timestamp: u64,
     }
 
+    // H-07: Helper function to remove a borrower from the borrowers_list
+    fun remove_borrower_from_list(borrowers_list: &mut vector<address>, borrower: address) {
+        let len = vector::length(borrowers_list);
+        let i = 0;
+        while (i < len) {
+            if (*vector::borrow(borrowers_list, i) == borrower) {
+                vector::swap_remove(borrowers_list, i);
+                return
+            };
+            i = i + 1;
+        };
+    }
+
     /// Initialize the credit manager
     public entry fun initialize(
         admin: &signer,
         lending_pool_addr: address,
-        collateral_vault_addr: address,
         reputation_manager_addr: address,
-        interest_rate_model_addr: address,
         token_metadata_addr: address,
     ) {
         let admin_addr = signer::address_of(admin);
 
         assert!(!exists<CreditManager>(admin_addr), error::already_exists(E_ALREADY_INITIALIZED));
         assert!(lending_pool_addr != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
-        assert!(collateral_vault_addr != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
         assert!(reputation_manager_addr != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
-        assert!(interest_rate_model_addr != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
 
         let token_metadata = object::address_to_object<Metadata>(token_metadata_addr);
 
@@ -205,9 +223,7 @@ module credit_protocol::credit_manager {
             admin: admin_addr,
             pending_admin: option::none(),
             lending_pool_addr,
-            collateral_vault_addr,
             reputation_manager_addr,
-            interest_rate_model_addr,
             fixed_interest_rate: 1500, // 15%
             reputation_threshold: 750,
             credit_increase_multiplier: 12000, // 120%
@@ -237,9 +253,10 @@ module credit_protocol::credit_manager {
             error::already_exists(E_CREDIT_LINE_EXISTS)
         );
 
-        // Deposit collateral to lending pool (it will earn interest there!)
+        // H-15: Pass manager_addr to lending pool
         lending_pool::deposit_collateral(
             manager.lending_pool_addr,
+            manager_addr,
             borrower_addr,
             collateral_amount,
             borrower
@@ -283,14 +300,17 @@ module credit_protocol::credit_manager {
 
         assert!(!manager.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
         assert!(collateral_amount > 0, error::invalid_argument(E_INVALID_AMOUNT));
+        // H-01: Enforce minimum collateral amount
+        assert!(collateral_amount >= MIN_COLLATERAL_AMOUNT, error::invalid_argument(E_BELOW_MINIMUM_AMOUNT));
         assert!(
             table::contains(&manager.credit_lines, borrower_addr),
             error::not_found(E_CREDIT_LINE_NOT_ACTIVE)
         );
 
-        // Deposit additional collateral to lending pool
+        // H-15: Pass manager_addr to lending pool
         lending_pool::deposit_collateral(
             manager.lending_pool_addr,
+            manager_addr,
             borrower_addr,
             collateral_amount,
             borrower
@@ -307,9 +327,17 @@ module credit_protocol::credit_manager {
         // Update initial collateral tracking
         credit_line.initial_collateral = credit_line.initial_collateral + collateral_amount;
 
-        // Reactivate the credit line if it was inactive
+        // H-02: Reactivate the credit line if it was inactive, with proper state reset
         if (!credit_line.is_active) {
             credit_line.is_active = true;
+            // Reset stale fields when reactivating
+            credit_line.borrowed_amount = 0;
+            credit_line.interest_accrued = 0;
+            credit_line.last_borrowed_timestamp = 0;
+            credit_line.last_interest_update = timestamp::now_seconds();
+            credit_line.repayment_due_date = 0;
+            // Re-add borrower to list since they were removed on deactivation
+            vector::push_back(&mut manager.borrowers_list, borrower_addr);
         };
 
         event::emit(CollateralAddedEvent {
@@ -344,15 +372,22 @@ module credit_protocol::credit_manager {
         let credit_line = table::borrow_mut(&mut manager.credit_lines, borrower_addr);
         assert!(credit_line.is_active, error::invalid_state(E_CREDIT_LINE_NOT_ACTIVE));
 
+        // M-07: Overflow check before adding to borrowed_amount
+        assert!(
+            (credit_line.borrowed_amount as u256) + (amount as u256) <= MAX_U64,
+            error::invalid_state(E_OVERFLOW)
+        );
+
         // Get dynamic credit limit from lending pool (collateral + earned interest)
         let (_, _, credit_limit) = lending_pool::get_collateral_with_interest(
             manager.lending_pool_addr,
             borrower_addr
         );
 
-        let total_debt = credit_line.borrowed_amount + credit_line.interest_accrued;
+        // NH-2: Use u256 for total_debt to prevent overflow
+        let total_debt_u256 = (credit_line.borrowed_amount as u256) + (credit_line.interest_accrued as u256);
         assert!(
-            total_debt + amount <= credit_limit,
+            total_debt_u256 + (amount as u256) <= (credit_limit as u256),
             error::invalid_state(E_EXCEEDS_CREDIT_LIMIT)
         );
 
@@ -360,14 +395,23 @@ module credit_protocol::credit_manager {
         let available_liquidity = lending_pool::get_available_liquidity(manager.lending_pool_addr);
         assert!(available_liquidity >= amount, error::invalid_state(E_INSUFFICIENT_LIQUIDITY));
 
+        // C-01: Only set repayment_due_date on the FIRST borrow
+        let is_first_borrow = credit_line.repayment_due_date == 0 || credit_line.borrowed_amount == 0;
+
         // Update credit line state first
         credit_line.borrowed_amount = credit_line.borrowed_amount + amount;
         credit_line.last_borrowed_timestamp = timestamp::now_seconds();
-        credit_line.repayment_due_date = timestamp::now_seconds() + GRACE_PERIOD + 2592000;
 
+        if (is_first_borrow) {
+            credit_line.repayment_due_date = timestamp::now_seconds() + GRACE_PERIOD + 2592000;
+        };
+
+        // H-15: Pass manager_addr to lending pool
         // Get funds from lending pool - this deposits directly to borrower
         lending_pool::borrow_for_payment(
             manager.lending_pool_addr,
+            manager_addr,
+            borrower_addr,
             borrower_addr,
             amount
         );
@@ -396,6 +440,10 @@ module credit_protocol::credit_manager {
         assert!(amount >= MIN_BORROW_AMOUNT, error::invalid_argument(E_BELOW_MINIMUM_AMOUNT));
         assert!(recipient != borrower_addr, error::invalid_argument(E_INVALID_ADDRESS));
         assert!(recipient != @0x0, error::invalid_argument(E_INVALID_ADDRESS));
+        // H-13 + M-10 + NM-2: Prevent sending to pool, manager, or reputation addresses
+        assert!(recipient != manager.lending_pool_addr, error::invalid_argument(E_INVALID_ADDRESS));
+        assert!(recipient != manager_addr, error::invalid_argument(E_INVALID_ADDRESS));
+        assert!(recipient != manager.reputation_manager_addr, error::invalid_argument(E_INVALID_ADDRESS));
         assert!(
             table::contains(&manager.credit_lines, borrower_addr),
             error::not_found(E_CREDIT_LINE_NOT_ACTIVE)
@@ -407,15 +455,22 @@ module credit_protocol::credit_manager {
         let credit_line = table::borrow_mut(&mut manager.credit_lines, borrower_addr);
         assert!(credit_line.is_active, error::invalid_state(E_CREDIT_LINE_NOT_ACTIVE));
 
+        // M-07: Overflow check before adding to borrowed_amount
+        assert!(
+            (credit_line.borrowed_amount as u256) + (amount as u256) <= MAX_U64,
+            error::invalid_state(E_OVERFLOW)
+        );
+
         // Get dynamic credit limit from lending pool (collateral + earned interest)
         let (_, _, credit_limit) = lending_pool::get_collateral_with_interest(
             manager.lending_pool_addr,
             borrower_addr
         );
 
-        let total_debt = credit_line.borrowed_amount + credit_line.interest_accrued;
+        // NH-2: Use u256 for total_debt to prevent overflow
+        let total_debt_u256 = (credit_line.borrowed_amount as u256) + (credit_line.interest_accrued as u256);
         assert!(
-            total_debt + amount <= credit_limit,
+            total_debt_u256 + (amount as u256) <= (credit_limit as u256),
             error::invalid_state(E_EXCEEDS_CREDIT_LIMIT)
         );
 
@@ -423,14 +478,23 @@ module credit_protocol::credit_manager {
         let available_liquidity = lending_pool::get_available_liquidity(manager.lending_pool_addr);
         assert!(available_liquidity >= amount, error::invalid_state(E_INSUFFICIENT_LIQUIDITY));
 
+        // C-01: Only set repayment_due_date on the FIRST borrow
+        let is_first_borrow = credit_line.repayment_due_date == 0 || credit_line.borrowed_amount == 0;
+
         // Update credit line state first
         credit_line.borrowed_amount = credit_line.borrowed_amount + amount;
         credit_line.last_borrowed_timestamp = timestamp::now_seconds();
-        credit_line.repayment_due_date = timestamp::now_seconds() + GRACE_PERIOD + 2592000;
 
+        if (is_first_borrow) {
+            credit_line.repayment_due_date = timestamp::now_seconds() + GRACE_PERIOD + 2592000;
+        };
+
+        // H-15: Pass manager_addr to lending pool
         // Get funds from lending pool and send directly to recipient
         lending_pool::borrow_for_payment(
             manager.lending_pool_addr,
+            manager_addr,
+            borrower_addr,
             recipient,
             amount
         );
@@ -497,19 +561,22 @@ module credit_protocol::credit_manager {
 
         let remaining_balance = credit_line.borrowed_amount;
 
+        // H-15: Pass manager_addr to lending pool
         // Send repayment to lending pool with accounting update
         lending_pool::receive_repayment(
             manager.lending_pool_addr,
+            manager_addr,
             borrower_addr,
             principal_amount,
             interest_amount,
             borrower
         );
 
-        // Update reputation in reputation manager
+        // H-09: Update reputation without borrower signer
+        // NC-1: Pass manager_addr for credit_manager validation
         reputation_manager::update_reputation(
-            borrower,
             manager.reputation_manager_addr,
+            manager_addr,
             borrower_addr,
             is_on_time,
             principal_amount + interest_amount
@@ -556,25 +623,49 @@ module credit_protocol::credit_manager {
 
         assert!(is_over_ltv || is_overdue, error::invalid_state(E_LIQUIDATION_NOT_ALLOWED));
 
-        let total_debt = credit_line.borrowed_amount + credit_line.interest_accrued;
+        // NH-2: Overflow-safe total_debt — cap at u64 max for token operations
+        let total_debt_u256 = (credit_line.borrowed_amount as u256) + (credit_line.interest_accrued as u256);
+        let total_debt = if (total_debt_u256 > MAX_U64) { (MAX_U64 as u64) } else { (total_debt_u256 as u64) };
         let collateral_to_liquidate = if (total_debt < total_collateral) {
             total_debt
         } else {
             total_collateral
         };
 
-        // Withdraw collateral from lending pool to cover debt
-        let _withdrawn = lending_pool::withdraw_collateral(
+        // H-15: Pass manager_addr to lending pool
+        // Seize collateral — funds stay in pool to cover the bad debt
+        let _seized = lending_pool::seize_collateral(
             manager.lending_pool_addr,
+            manager_addr,
             borrower,
-            collateral_to_liquidate,
-            false // Don't include interest bonus for liquidation
+            collateral_to_liquidate
         );
+
+        // C-06: Record default in reputation manager
+        // NC-1: Pass manager_addr for credit_manager validation
+        reputation_manager::record_default(
+            manager.reputation_manager_addr,
+            manager_addr,
+            borrower,
+            total_debt
+        );
+
+        // C-07: Write off bad debt to keep utilization rate accurate
+        // NH-1: Only write off borrowed_amount (principal), not interest — interest was never in total_borrowed
+        let principal_to_write_off = credit_line.borrowed_amount;
 
         // Update credit line
         credit_line.borrowed_amount = 0;
         credit_line.interest_accrued = 0;
         credit_line.initial_collateral = 0;
+
+        // NH-1: Write off only borrowed principal to keep utilization accurate
+        lending_pool::write_off_bad_debt(
+            manager.lending_pool_addr,
+            manager_addr,
+            borrower,
+            principal_to_write_off
+        );
 
         // Check if any collateral remains
         let (remaining_principal, _, _) = lending_pool::get_collateral_with_interest(
@@ -584,6 +675,8 @@ module credit_protocol::credit_manager {
 
         if (remaining_principal == 0) {
             credit_line.is_active = false;
+            // H-07: Remove borrower from list when deactivated
+            remove_borrower_from_list(&mut manager.borrowers_list, borrower);
         };
 
         let reason = if (is_over_ltv) {
@@ -693,8 +786,9 @@ module credit_protocol::credit_manager {
         );
 
         let eligible = has_good_reputation && has_repayment_history && no_current_debt;
+        // H-14: Fix `as u64` precedence with explicit parentheses
         let new_limit = if (eligible) {
-            ((current_limit as u256) * manager.credit_increase_multiplier / BASIS_POINTS as u64)
+            (((current_limit as u256) * manager.credit_increase_multiplier / BASIS_POINTS) as u64)
         } else {
             0
         };
@@ -746,10 +840,15 @@ module credit_protocol::credit_manager {
             error::invalid_argument(E_INVALID_AMOUNT)
         );
 
+        // M-12: Store principal_before for accurate interest calculation
+        let principal_before = principal;
+
+        // H-15: Pass manager_addr to lending pool
         // Withdraw from lending pool (includes interest if withdrawing all)
         let include_interest = amount >= principal;
         let withdrawn = lending_pool::withdraw_collateral(
             manager.lending_pool_addr,
+            manager_addr,
             borrower_addr,
             amount,
             include_interest
@@ -767,9 +866,13 @@ module credit_protocol::credit_manager {
         // Deactivate credit line if all collateral is withdrawn
         if (remaining_total == 0) {
             credit_line.is_active = false;
+            // H-07: Remove borrower from list when deactivated
+            remove_borrower_from_list(&mut manager.borrowers_list, borrower_addr);
         };
 
-        let interest_withdrawn = if (withdrawn > amount) { withdrawn - amount } else { 0 };
+        // M-12: Calculate interest withdrawn accurately
+        let principal_withdrawn = if (amount <= principal_before) { amount } else { principal_before };
+        let interest_withdrawn = if (withdrawn > principal_withdrawn) { withdrawn - principal_withdrawn } else { 0 };
 
         event::emit(CollateralWithdrawnEvent {
             borrower: borrower_addr,
@@ -864,7 +967,17 @@ module credit_protocol::credit_manager {
         let manager = borrow_global_mut<CreditManager>(manager_addr);
 
         assert!(manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
+        assert!(option::is_some(&manager.pending_admin), error::invalid_state(E_PENDING_ADMIN_NOT_SET));
+
+        let cancelled_pending = *option::borrow(&manager.pending_admin);
         manager.pending_admin = option::none();
+
+        // H-06: Emit AdminTransferCancelledEvent
+        event::emit(AdminTransferCancelledEvent {
+            admin: admin_addr,
+            cancelled_pending_admin: cancelled_pending,
+            timestamp: timestamp::now_seconds(),
+        });
     }
 
     /// Update parameters with validation
@@ -880,6 +993,8 @@ module credit_protocol::credit_manager {
 
         assert!(manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
         assert!(fixed_interest_rate <= MAX_INTEREST_RATE, error::invalid_argument(E_INVALID_PARAMETERS));
+        // M-09: Enforce minimum interest rate of 1%
+        assert!(fixed_interest_rate >= MIN_INTEREST_RATE, error::invalid_argument(E_INVALID_PARAMETERS));
         assert!(reputation_threshold <= 1000, error::invalid_argument(E_INVALID_PARAMETERS));
         assert!(
             credit_increase_multiplier >= BASIS_POINTS && credit_increase_multiplier <= MAX_CREDIT_MULTIPLIER,
@@ -908,7 +1023,13 @@ module credit_protocol::credit_manager {
 
         let credit_line = table::borrow_mut(&mut manager.credit_lines, borrower);
         if (credit_line.borrowed_amount > 0 && credit_line.last_borrowed_timestamp > 0) {
-            credit_line.interest_accrued = credit_line.interest_accrued + new_interest;
+            // NH-2: Overflow-safe interest accumulation — cap at MAX_U64
+            let new_accrued = (credit_line.interest_accrued as u256) + (new_interest as u256);
+            credit_line.interest_accrued = if (new_accrued > MAX_U64) {
+                (MAX_U64 as u64)
+            } else {
+                (new_accrued as u64)
+            };
             credit_line.last_interest_update = timestamp::now_seconds();
         };
     }
@@ -938,8 +1059,9 @@ module credit_protocol::credit_manager {
     fun is_over_ltv_internal(credit_line: &CreditLine, collateral_value: u64): bool {
         if (collateral_value == 0) return true;
 
-        let total_debt = credit_line.borrowed_amount + credit_line.interest_accrued;
-        let current_ltv = ((total_debt as u256) * BASIS_POINTS) / (collateral_value as u256);
+        // NH-2: Use u256 to prevent overflow in total_debt calculation
+        let total_debt = (credit_line.borrowed_amount as u256) + (credit_line.interest_accrued as u256);
+        let current_ltv = (total_debt * BASIS_POINTS) / (collateral_value as u256);
         current_ltv > LIQUIDATION_THRESHOLD
     }
 

@@ -4,10 +4,13 @@ version = "1.0.1"
 authors = ["Credit Protocol Team"]
 
 [addresses]
-credit_protocol = "0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78"
+credit_protocol = "_"
 
 [dev-addresses]
 credit_protocol = "0xceb67803c3af67e2031e319f021e693ead697dda75e59a7b85a7e75a1cda4d78"
+
+# For production deployment, compile with:
+# aptos move compile --named-addresses credit_protocol=0xYOUR_DEPLOYED_ADDRESS
 
 [dependencies.AptosFramework]
 git = "https://github.com/aptos-labs/aptos-core.git"

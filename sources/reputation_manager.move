@@ -7,6 +7,9 @@ module credit_protocol::reputation_manager {
     use aptos_framework::event;
     use aptos_framework::table::{Self, Table};
 
+    // Only credit_manager can call reputation update functions
+    friend credit_protocol::credit_manager;
+
     /// Error codes
     const E_NOT_AUTHORIZED: u64 = 1;
     const E_USER_NOT_INITIALIZED: u64 = 2;
@@ -21,9 +24,9 @@ module credit_protocol::reputation_manager {
     const MIN_SCORE: u256 = 0;
     const MAX_SCORE: u256 = 1000;
     const DEFAULT_SCORE: u256 = 500;
-    const BRONZE_THRESHOLD: u256 = 300;
-    const SILVER_THRESHOLD: u256 = 600;
-    const GOLD_THRESHOLD: u256 = 850;
+    const SILVER_THRESHOLD: u256 = 300;
+    const GOLD_THRESHOLD: u256 = 600;
+    const PLATINUM_THRESHOLD: u256 = 850;
 
     /// Reputation tier constants
     const REPUTATION_TIER_BRONZE: u8 = 0;
@@ -127,6 +130,13 @@ module credit_protocol::reputation_manager {
         timestamp: u64,
     }
 
+    #[event]
+    struct AdminTransferCancelledEvent has drop, store {
+        admin: address,
+        cancelled_pending_admin: address,
+        timestamp: u64,
+    }
+
     /// Initialize the reputation manager
     public entry fun initialize(
         admin: &signer,
@@ -198,17 +208,19 @@ module credit_protocol::reputation_manager {
     }
 
     /// Update reputation based on payment behavior
-    /// Note: This function is called by credit_manager module during repayments.
-    /// The caller_signer is the borrower, but authorization is handled through the credit_manager module.
-    public entry fun update_reputation(
-        _caller: &signer,  // Kept for entry function compatibility
+    /// Only callable by the credit_manager module (friend access)
+    /// NC-1: credit_manager_addr validated to prevent rogue CreditManager reputation farming
+    public(friend) fun update_reputation(
         manager_addr: address,
+        credit_manager_addr: address,
         borrower: address,
         is_positive: bool,
         _amount: u64,
     ) acquires ReputationManager {
         let rep_manager = borrow_global_mut<ReputationManager>(manager_addr);
         assert!(!rep_manager.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
+        // NC-1: Validate caller is the registered credit manager
+        assert!(rep_manager.credit_manager == credit_manager_addr, error::permission_denied(E_NOT_AUTHORIZED));
 
         // Initialize user if not already initialized
         if (!table::contains(&rep_manager.reputations, borrower)) {
@@ -229,21 +241,24 @@ module credit_protocol::reputation_manager {
     }
 
     /// Record a default/liquidation event
-    public entry fun record_default(
-        credit_manager: &signer,
+    /// Only callable by the credit_manager module (friend access)
+    /// NC-1: credit_manager_addr validated to prevent rogue CreditManager abuse
+    public(friend) fun record_default(
         manager_addr: address,
+        credit_manager_addr: address,
         user: address,
         debt_amount: u64,
     ) acquires ReputationManager {
-        let manager_addr_signer = signer::address_of(credit_manager);
         let rep_manager = borrow_global_mut<ReputationManager>(manager_addr);
 
-        assert!(
-            rep_manager.credit_manager == manager_addr_signer,
-            error::permission_denied(E_NOT_AUTHORIZED)
-        );
         assert!(!rep_manager.is_paused, error::invalid_state(E_NOT_AUTHORIZED));
-        assert!(table::contains(&rep_manager.reputations, user), error::not_found(E_USER_NOT_INITIALIZED));
+        // NC-1: Validate caller is the registered credit manager
+        assert!(rep_manager.credit_manager == credit_manager_addr, error::permission_denied(E_NOT_AUTHORIZED));
+
+        // Initialize user if not already initialized (same pattern as update_reputation)
+        if (!table::contains(&rep_manager.reputations, user)) {
+            initialize_user_internal(rep_manager, user);
+        };
 
         let reputation_data = table::borrow_mut(&mut rep_manager.reputations, user);
         reputation_data.defaults = reputation_data.defaults + 1;
@@ -342,6 +357,11 @@ module credit_protocol::reputation_manager {
 
         assert!(rep_manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
 
+        assert!(on_time_bonus > 0 && on_time_bonus <= MAX_SCORE, error::invalid_argument(E_INVALID_PARAMETERS));
+        assert!(late_payment_penalty > 0 && late_payment_penalty <= MAX_SCORE, error::invalid_argument(E_INVALID_PARAMETERS));
+        assert!(default_penalty > 0 && default_penalty <= MAX_SCORE, error::invalid_argument(E_INVALID_PARAMETERS));
+        assert!(max_score_change > 0 && max_score_change <= MAX_SCORE, error::invalid_argument(E_INVALID_PARAMETERS));
+
         rep_manager.on_time_bonus = on_time_bonus;
         rep_manager.late_payment_penalty = late_payment_penalty;
         rep_manager.default_penalty = default_penalty;
@@ -439,7 +459,15 @@ module credit_protocol::reputation_manager {
         let rep_manager = borrow_global_mut<ReputationManager>(manager_addr);
 
         assert!(rep_manager.admin == admin_addr, error::permission_denied(E_NOT_AUTHORIZED));
+
+        let cancelled_pending_admin = *std::option::borrow(&rep_manager.pending_admin);
         rep_manager.pending_admin = std::option::none();
+
+        event::emit(AdminTransferCancelledEvent {
+            admin: admin_addr,
+            cancelled_pending_admin,
+            timestamp: timestamp::now_seconds(),
+        });
     }
 
     /// Internal function to initialize a user
@@ -525,11 +553,11 @@ module credit_protocol::reputation_manager {
 
     /// Calculate reputation tier based on score
     fun calculate_tier(score: u256): u8 {
-        if (score >= GOLD_THRESHOLD) {
+        if (score >= PLATINUM_THRESHOLD) {
             REPUTATION_TIER_PLATINUM
-        } else if (score >= SILVER_THRESHOLD) {
+        } else if (score >= GOLD_THRESHOLD) {
             REPUTATION_TIER_GOLD
-        } else if (score >= BRONZE_THRESHOLD) {
+        } else if (score >= SILVER_THRESHOLD) {
             REPUTATION_TIER_SILVER
         } else {
             REPUTATION_TIER_BRONZE
@@ -570,7 +598,7 @@ module credit_protocol::reputation_manager {
 
     #[view]
     public fun get_tier_thresholds(): (u256, u256, u256, u256, u256) {
-        (MIN_SCORE, BRONZE_THRESHOLD, SILVER_THRESHOLD, GOLD_THRESHOLD, MAX_SCORE)
+        (MIN_SCORE, SILVER_THRESHOLD, GOLD_THRESHOLD, PLATINUM_THRESHOLD, MAX_SCORE)
     }
 
     #[view]

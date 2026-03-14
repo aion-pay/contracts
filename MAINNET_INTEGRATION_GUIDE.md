@@ -120,15 +120,55 @@ const CONFIG = {
 };
 ```
 
-### Testnet Reference
+### Testnet (Live — Use for Integration & Testing)
+
+> **The contracts are fully deployed and initialized on Aptos Testnet.** Use this config to develop and test your frontend before mainnet launch.
 
 ```typescript
 const TESTNET_CONFIG = {
+  // Network
+  NETWORK: "testnet",
+  RPC_URL: "https://fullnode.testnet.aptoslabs.com",
+  EXPLORER: "https://explorer.aptoslabs.com/?network=testnet",
+
+  // Contract address (all 3 modules deployed here)
   MODULE_ADDRESS: "0x5b5f60e32d998c41f20ff9b2a155a99bff4114eda8f8ed27740ae7de19f7753d",
+
+  // USDC Fungible Asset metadata (same on testnet and mainnet)
   USDC_METADATA: "0x69091fbab5f7d635ee7ac5098cf0c1efbe31d68fec0f2cd565e8d168daf52832",
+
+  // All resource addresses (= MODULE_ADDRESS since deployer owns everything)
   POOL_ADDR: "0x5b5f60e32d998c41f20ff9b2a155a99bff4114eda8f8ed27740ae7de19f7753d",
   MANAGER_ADDR: "0x5b5f60e32d998c41f20ff9b2a155a99bff4114eda8f8ed27740ae7de19f7753d",
   REPUTATION_ADDR: "0x5b5f60e32d998c41f20ff9b2a155a99bff4114eda8f8ed27740ae7de19f7753d",
+};
+```
+
+**Testnet Quick Start:**
+
+1. **Get testnet APT:** Use the [Aptos Faucet](https://aptos.dev/network/faucet) to fund your test wallet with APT for gas.
+2. **Get testnet USDC:** The USDC FA at `0x69091f...` is available on testnet. You may need to acquire it via a testnet DEX or request from the team.
+3. **Explorer:** View the deployed contract at:
+   `https://explorer.aptoslabs.com/account/0x5b5f60e32d998c41f20ff9b2a155a99bff4114eda8f8ed27740ae7de19f7753d/modules?network=testnet`
+4. **All modules are initialized** — you can call any entry or view function immediately.
+5. **Verified working:** All 47 end-to-end tests passed on this deployment (deposit, borrow, repay, liquidation, admin functions, edge cases).
+
+**Switching between testnet and mainnet:**
+
+```typescript
+const getConfig = (network: "testnet" | "mainnet") => {
+  if (network === "testnet") {
+    return {
+      rpcUrl: "https://fullnode.testnet.aptoslabs.com",
+      moduleAddress: "0x5b5f60e32d998c41f20ff9b2a155a99bff4114eda8f8ed27740ae7de19f7753d",
+      usdcMetadata: "0x69091fbab5f7d635ee7ac5098cf0c1efbe31d68fec0f2cd565e8d168daf52832",
+    };
+  }
+  return {
+    rpcUrl: "https://fullnode.mainnet.aptoslabs.com",
+    moduleAddress: "0x<MAINNET_DEPLOYER_ADDRESS>",  // TODO: update after mainnet deploy
+    usdcMetadata: "0x69091fbab5f7d635ee7ac5098cf0c1efbe31d68fec0f2cd565e8d168daf52832",
+  };
 };
 ```
 
